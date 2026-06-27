@@ -1,0 +1,461 @@
+openapi: 3.0.3
+info:
+  title: MedPartners & CleanPricer API
+  description: REST API для автоматической обработки прайс-листов клиник-партнеров, нормализации медицинских услуг, ручной верификации и поиска цен.
+  version: 1.0.0
+servers:
+  - url: /
+paths:
+  /api/services:
+    get:
+      summary: Получить список услуг справочника
+      description: Возвращает список всех услуг из справочника с возможностью фильтрации по категории.
+      parameters:
+        - name: category
+          in: query
+          description: Категория услуги (например, лаборатория, диагностика)
+          required: false
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Успешный ответ со списком услуг.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Service'
+        '500':
+          description: Ошибка сервера.
+
+  /api/services/{id}/partners:
+    get:
+      summary: Получить список клиник, оказывающих услугу
+      description: Возвращает клиники и цены для выбранной услуги по её ID.
+      parameters:
+        - name: id
+          in: path
+          description: Уникальный идентификатор услуги (UUID)
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Успешный ответ со списком партнеров и цен.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/ServicePartnerPrice'
+        '500':
+          description: Ошибка сервера.
+
+  /api/partners:
+    get:
+      summary: Получить список клиник-партнеров
+      description: Возвращает список всех клиник с возможностью фильтрации по городу и статусу.
+      parameters:
+        - name: city
+          in: query
+          description: Город клиники
+          required: false
+          schema:
+            type: string
+        - name: status
+          in: query
+          description: Статус клиники (active или inactive)
+          required: false
+          schema:
+            type: string
+            enum: [active, inactive]
+      responses:
+        '200':
+          description: Успешный ответ со списком партнеров.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Partner'
+        '500':
+          description: Ошибка сервера.
+
+  /api/partners/{id}/services:
+    get:
+      summary: Получить все услуги конкретной клиники
+      description: Возвращает список всех услуг и их цен для конкретного партнера по его ID.
+      parameters:
+        - name: id
+          in: path
+          description: Уникальный идентификатор клиники (UUID)
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Успешный ответ со списком услуг клиники.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/PartnerServicePrice'
+        '500':
+          description: Ошибка сервера.
+
+  /api/search:
+    get:
+      summary: Полнотекстовый поиск
+      description: Осуществляет поиск услуг по названию/синонимам и клиник по имени/городу.
+      parameters:
+        - name: q
+          in: query
+          description: Поисковый запрос
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Успешный ответ с результатами поиска.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  partners:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Partner'
+                  services:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Service'
+        '500':
+          description: Ошибка сервера.
+
+  /api/unmatched:
+    get:
+      summary: Список несопоставленных позиций
+      description: Возвращает список всех позиций прайс-листов, которые не удалось сопоставить со справочником автоматически.
+      responses:
+        '200':
+          description: Успешный ответ со списком несопоставленных позиций.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/UnmatchedItem'
+        '500':
+          description: Ошибка сервера.
+
+  /api/match:
+    post:
+      summary: Ручное сопоставление позиции со справочником
+      description: Связывает несопоставленную позицию прайс-листа с целевой услугой из справочника и добавляет её в синонимы.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - item_id
+                - service_id
+              properties:
+                item_id:
+                  type: string
+                  format: uuid
+                  description: ID позиции прайса
+                service_id:
+                  type: string
+                  format: uuid
+                  description: ID целевой услуги справочника
+                verification_note:
+                  type: string
+                  description: Комментарий к сопоставлению
+      responses:
+        '200':
+          description: Позиция успешно сопоставлена.
+        '400':
+          description: Неверные параметры запроса.
+        '404':
+          description: Позиция прайса не найдена.
+        '500':
+          description: Ошибка сервера.
+
+  /api/verify:
+    post:
+      summary: Ручная верификация позиции
+      description: Подтверждает или отклоняет запись, находящуюся в очереди верификации (например, из-за аномалий цены).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - item_id
+              properties:
+                item_id:
+                  type: string
+                  format: uuid
+                  description: ID позиции прайса
+                is_verified:
+                  type: boolean
+                  description: Флаг подтверждения (по умолчанию true)
+                verification_note:
+                  type: string
+                  description: Примечание к верификации
+      responses:
+        '200':
+          description: Запись успешно верифицирована.
+        '400':
+          description: Отсутствует item_id.
+        '404':
+          description: Позиция не найдена.
+        '500':
+          description: Ошибка сервера.
+
+  /api/dashboard:
+    get:
+      summary: Получить статистику процессора
+      description: Возвращает агрегированные данные о количестве документов, доле нормализации и очередях.
+      responses:
+        '200':
+          description: Успешный ответ со статистикой.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  documents:
+                    type: object
+                    properties:
+                      pending:
+                        type: integer
+                      processing:
+                        type: integer
+                      done:
+                        type: integer
+                      error:
+                        type: integer
+                      needs_review:
+                        type: integer
+                  total_items:
+                    type: integer
+                  matched_items:
+                    type: integer
+                  unmatched_items:
+                    type: integer
+                  unverified_items:
+                    type: integer
+                  normalization_rate:
+                    type: integer
+                    description: Процент успешной нормализации (0-100)
+        '500':
+          description: Ошибка сервера.
+
+  /api/settings:
+    get:
+      summary: Получить текущие настройки системы
+      description: Возвращает пороговые значения автосопоставления и конфигурацию валют.
+      responses:
+        '200':
+          description: Успешный ответ.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Settings'
+    post:
+      summary: Сохранить настройки системы
+      description: Обновляет конфигурационные параметры в config.json.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/Settings'
+      responses:
+        '200':
+          description: Настройки успешно сохранены.
+        '500':
+          description: Ошибка сервера.
+
+  /api/uploads/{filename}:
+    get:
+      summary: Скачать оригинальный файл документа
+      description: Позволяет скачать исходный файл прайс-листа из папки uploads.
+      parameters:
+        - name: filename
+          in: path
+          description: Название файла
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Файл успешно загружен.
+          content:
+            application/octet-stream:
+              schema:
+                type: string
+                format: binary
+        '404':
+          description: Файл не найден.
+        '500':
+          description: Ошибка сервера.
+
+components:
+  schemas:
+    Service:
+      type: object
+      properties:
+        service_id:
+          type: string
+          format: uuid
+        service_name:
+          type: string
+        synonyms:
+          type: array
+          items:
+            type: string
+        category:
+          type: string
+        icd_code:
+          type: string
+        is_active:
+          type: boolean
+
+    Partner:
+      type: object
+      properties:
+        partner_id:
+          type: string
+          format: uuid
+        name:
+          type: string
+        city:
+          type: string
+        address:
+          type: string
+        bin:
+          type: string
+        contact_email:
+          type: string
+        contact_phone:
+          type: string
+        is_active:
+          type: boolean
+
+    Settings:
+      type: object
+      properties:
+        autoCategory:
+          type: boolean
+        defaultCurrency:
+          type: string
+        autoMatchThreshold:
+          type: number
+          format: float
+        manualReviewThreshold:
+          type: number
+          format: float
+
+    ServicePartnerPrice:
+      type: object
+      properties:
+        item_id:
+          type: string
+          format: uuid
+        price_resident_kzt:
+          type: number
+        price_nonresident_kzt:
+          type: number
+        price_original:
+          type: number
+        currency_original:
+          type: string
+        effective_date:
+          type: string
+          format: date
+        is_verified:
+          type: boolean
+        verification_note:
+          type: string
+        partner_id:
+          type: string
+          format: uuid
+        partner_name:
+          type: string
+        city:
+          type: string
+        address:
+          type: string
+
+    PartnerServicePrice:
+      type: object
+      properties:
+        item_id:
+          type: string
+          format: uuid
+        service_name_raw:
+          type: string
+        price_resident_kzt:
+          type: number
+        price_nonresident_kzt:
+          type: number
+        price_original:
+          type: number
+        currency_original:
+          type: string
+        effective_date:
+          type: string
+          format: date
+        is_verified:
+          type: boolean
+        verification_note:
+          type: string
+        service_id:
+          type: string
+          format: uuid
+        normalized_name:
+          type: string
+        category:
+          type: string
+
+    UnmatchedItem:
+      type: object
+      properties:
+        item_id:
+          type: string
+          format: uuid
+        service_name_raw:
+          type: string
+        price_resident_kzt:
+          type: number
+        price_nonresident_kzt:
+          type: number
+        price_original:
+          type: number
+        currency_original:
+          type: string
+        effective_date:
+          type: string
+          format: date
+        verification_note:
+          type: string
+        doc_id:
+          type: string
+          format: uuid
+        partner_id:
+          type: string
+          format: uuid
+        partner_name:
+          type: string
+        file_name:
+          type: string

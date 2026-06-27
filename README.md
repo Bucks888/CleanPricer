@@ -1,36 +1,85 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# CleanPricer — Система автоматической обработки прайс-листов клиник-партнёров
 
-## Getting Started
+система автоматического разбора, структуры, нормализации цен и сопоставления медицинских услуг клиник-партнёров с целевым справочником.
 
-First, run the development server:
+---
 
-```bash
-npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
+## Основные возможности
+
+* **Мультиформатный импорт документов:** Парсинг файлов различных форматов в рамках одной очереди (PDF-текст, PDF-сканы через OCR, XLSX/XLS таблицы, DOCX-файлы с очисткой истории правок).
+* **Автоматическое нечёткое сопоставление (ИИ нормализация):** Сопоставление сырых названий услуг со справочником с использованием меры сходства (Cosine Similarity). Пороги уверенности настраиваются динамически (по умолчанию: автосопоставление при сходстве ≥ 0.85, ручное предложение при сходстве ≥ 0.70).
+* **Интеллектуальная валидация и предупреждения:**
+  * Полноценная обработка ценовых аномалий (отклонение > 50% от предыдущей цены).
+  * Контроль ценообразования для резидентов и нерезидентов (проверка правила `Нерезидент >= Резидент`).
+  * Фильтрация битых или неполных строк данных.
+* **Версионирование и хронология:** Полное ведение истории цен. Старые цены не удаляются, а автоматически архивируются (`is_active = false`) при импорте новых прайс-листов партнера.
+* **Динамические курсы валют:** Запрос текущих ставок конвертации USD/RUB относительно KZT через внешний API с безопасным таймаутом и резервными дефолтными значениями.
+* **Интегрированная REST API документация:** Полнофункциональный интерактивный раздел с OpenAPI 3.0 спецификацией и интеграцией со Swagger Editor для быстрой проверки эндпоинтов разработчиками.
+
+---
+
+## Структура базы данных (PostgreSQL)
+
+Проект использует 4 основные сущности:
+1. **Партнёры (`partners`):** Информация о клиниках (БИН, город, контакты, статус активности).
+2. **Прайс-документы (`price_documents`):** Сведения о загруженном файле, статусе его обработки, логах ошибок/предупреждений и аудит-архиве (`raw_content`).
+3. **Позиции прайса (`price_items`):** Индивидуальные цены на услуги. Включает оригинальные цены в USD/RUB, ручные пометки верификации и признак актуальности `is_active`.
+4. **Услуги справочника (`services`):** Целевой номенклатурный справочник с синонимами для нормализации и кодами МКБ.
+
+---
+
+## Архитектура и стек технологий
+
+* **Фронтенд:** Next.js (React 19, TailwindCSS v4, Framer Motion, Lucide Icons).
+* **Бэкенд:** Next.js API Routes (App Router).
+* **База данных:** PostgreSQL (клиент `pg` с пулом соединений).
+* **Парсеры:** `xlsx` (SheetJS) для таблиц, `pdf-parse` (с Node-полифиллами canvas) для PDF, `adm-zip` для DOCX.
+* **Очередь задач:** BullMQ + Redis с прозрачным резервным переключением на локальную последовательную очередь при отсутствии Redis, поддерживающая автовосстановление зависших транзакций при рестарте сервера.
+* **ИИ-интеграция:** Google Generative AI (модель `gemini-2.5-flash` в чанковом/кусочном режиме для обработки файлов любого объема без превышения лимитов токенов).
+
+---
+
+## Инструкция по запуску
+
+### 1. Предварительные требования
+* **Node.js** (версия 18 или выше).
+* **PostgreSQL** (с созданной базой данных).
+* **Ключ API Gemini** (полученный в Google AI Studio).
+
+### 2. Настройка окружения
+Создайте файл `.env.local` в корневой папке проекта со следующим содержимым:
+```env
+DATABASE_URL=postgres://postgres:пароль@localhost:5432/med_partners_db
+GEMINI_API_KEY=ваш_api_ключ_gemini
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+### 3. Установка зависимостей
+```bash
+npm install
+```
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+### 4. Сборка и запуск
+Соберите оптимизированное production-приложение:
+```bash
+npm run build
+```
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+Запустите сервер разработки:
+```bash
+npm run dev
+```
+Приложение будет доступно по адресу [http://localhost:3000](http://localhost:3000).
 
-## Learn More
+---
 
-To learn more about Next.js, take a look at the following resources:
+## REST API Эндпоинты
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
-
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
-
-## Deploy on Vercel
-
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
-
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+* `GET /api/services` — Получение справочника услуг (с фильтром по категории).
+* `GET /api/services/{id}/partners` — Поиск клиник, оказывающих услугу, с ценами.
+* `GET /api/partners` — Список зарегистрированных клиник (по городам/статусу).
+* `GET /api/partners/{id}/services` — Полный прайс конкретной клиники.
+* `GET /api/search?q={query}` — Полнотекстовый поиск по услугам и клиникам.
+* `GET /api/unmatched` — Очередь неразмеченных услуг.
+* `POST /api/match` — Привязка позиции прайса к справочнику.
+* `POST /api/verify` — Ручное подтверждение предупреждений/аномалий оператором.
+* `GET /api/uploads/{filename}` — Скачивание оригинального файла прайса.

@@ -1,0 +1,6 @@
+{
+  "autoCategory": true,
+  "defaultCurrency": "KZT",
+  "autoMatchThreshold": 0.85,
+  "manualReviewThreshold": 0.70
+}
