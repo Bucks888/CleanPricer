@@ -314,11 +314,21 @@ async function parsePdf(buffer: Buffer, fileName: string): Promise<ParsedPriceLi
 
   try {
     const pdfParseModule = (await import('pdf-parse')) as any;
-    const pdfParseFn = (typeof pdfParseModule.default === 'function'
-      ? pdfParseModule.default
-      : pdfParseModule);
-    const result = await pdfParseFn(buffer);
-    extractedText = result?.text || '';
+    if (typeof pdfParseModule.PDFParse === 'function') {
+      const parser = new pdfParseModule.PDFParse(new Uint8Array(buffer));
+      const result = await parser.getText();
+      extractedText = result?.text || '';
+    } else {
+      const pdfParseFn = (typeof pdfParseModule.default === 'function'
+        ? pdfParseModule.default
+        : (typeof pdfParseModule === 'function' ? pdfParseModule : null));
+      if (pdfParseFn) {
+        const result = await pdfParseFn(buffer);
+        extractedText = result?.text || '';
+      } else {
+        throw new Error('Не удалось найти функцию парсинга в модуле pdf-parse');
+      }
+    }
   } catch (err: unknown) {
     const message = err instanceof Error ? err.message : String(err);
     console.warn(`[PARSER] Локальный pdf-parse не удался, переходим к Gemini OCR: ${message}`);
