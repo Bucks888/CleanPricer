@@ -282,12 +282,18 @@ function parseTextLocally(text: string, fileName: string): ParsedPriceList | nul
       effectiveDate = dateCandidate;
     }
 
-    const match = cleanLine.match(/^(.*?)(?:[-:=→]|\s{2,})\s*(\d{1,3}(?:[ \u00a0]?\d{3}){0,2})\s*(?:тг|kzt|kzt\.|руб|rub|\$)?$/i);
+    const match = cleanLine.match(/^(.*?)(?:\s+-\s*|\s*-\s+|\s*[:=→]\s*|\s{2,})\s*(\d{1,3}(?:[ \u00a0]?\d{3}){0,2})\s*(тг|kzt|kzt\.|руб|rub|\$)?$/i);
     if (!match) continue;
 
     const name = normalizeWhitespace(match[1]);
     const price = parseMaybeNumber(match[2]);
+    const currencySign = match[3] ? match[3].toLowerCase() : '';
+
     if (name.length > 3 && price !== undefined && price > 0) {
+      // Исключаем ложные срабатывания вроде Jo-1, Scl-70, Galectin-3
+      if (price < 100 && !['$', 'rub', 'руб'].includes(currencySign)) {
+        continue;
+      }
       items.push({
         service_name_raw: name,
         price_original: price,
