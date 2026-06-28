@@ -2,84 +2,102 @@ import { writeFile, mkdir } from 'fs/promises';
 import { NextResponse } from 'next/server';
 import path from 'path';
 import fs from 'fs';
+import crypto from 'crypto';
 import AdmZip from 'adm-zip';
 import { get_or_create_partner, save_price_document } from '../../db_utils';
 import { enqueueDocument } from '../../queue_utils';
+import { createAuthErrorResponse, requireAuthenticatedSession } from '../../auth_utils';
+import {
+  buildStoredFileName,
+  isSupportedPriceFile,
+  sanitizeFileName,
+} from '../../safe_utils';
+
+const MAX_UPLOAD_SIZE_BYTES = 100 * 1024 * 1024;
 
 export async function POST(req: Request) {
   try {
+    if (!requireAuthenticatedSession(req.headers.get('cookie'))) {
+      return createAuthErrorResponse();
+    }
+
     const formData = await req.formData();
     const file = formData.get('file') as File | null;
+
     if (!file) {
       return NextResponse.json({ error: 'Файл не найден' }, { status: 400 });
     }
 
+    if (file.size > MAX_UPLOAD_SIZE_BYTES) {
+      return NextResponse.json({ error: 'Файл слишком большой' }, { status: 413 });
+    }
+
     const uploadDir = path.join(process.cwd(), 'uploads');
     if (!fs.existsSync(uploadDir)) {
-      await mkdir(uploadDir);
+      await mkdir(uploadDir, { recursive: true });
     }
 
     const fileBuffer = Buffer.from(await file.arrayBuffer());
-    const originalName = file.name;
-    const isZip = originalName.endsWith('.zip');
-
+    const originalName = sanitizeFileName(file.name);
+    const isZip = path.extname(originalName).toLowerCase() === '.zip';
     const filesToProcess: { filePath: string; fileName: string; fileFormat: string }[] = [];
 
     if (isZip) {
-      // Process ZIP archive
       const zip = new AdmZip(fileBuffer);
       const zipEntries = zip.getEntries();
 
       for (const entry of zipEntries) {
         if (entry.isDirectory) continue;
 
-        const name = entry.entryName;
-        // Skip hidden files, system files, or non-price extensions
-        if (path.basename(name).startsWith('.') || path.basename(name).startsWith('~')) {
+        const entryName = sanitizeFileName(entry.entryName);
+        if (path.basename(entryName).startsWith('.') || path.basename(entryName).startsWith('~')) {
           continue;
         }
 
-        const ext = path.extname(name).toLowerCase();
-        if (['.pdf', '.docx', '.xlsx', '.xls'].includes(ext)) {
-          const extractedBuffer = entry.getData();
-          const sanitizedBaseName = path.basename(name);
-          const destPath = path.join(uploadDir, sanitizedBaseName);
-          
-          await writeFile(destPath, extractedBuffer);
-
-          filesToProcess.push({
-            filePath: destPath,
-            fileName: sanitizedBaseName,
-            fileFormat: ext.substring(1), // e.g. 'pdf', 'xlsx'
-          });
+        const ext = path.extname(entryName).toLowerCase();
+        if (!['.pdf', '.docx', '.xlsx', '.xls'].includes(ext)) {
+          continue;
         }
+
+        const storedName = buildStoredFileName(path.basename(entryName), crypto.randomUUID());
+        const destPath = path.join(uploadDir, storedName);
+        await writeFile(destPath, entry.getData());
+
+        filesToProcess.push({
+          filePath: destPath,
+          fileName: storedName,
+          fileFormat: ext.substring(1),
+        });
       }
     } else {
-      // Process single file
-      const ext = path.extname(originalName).toLowerCase();
-      if (!['.pdf', '.docx', '.xlsx', '.xls'].includes(ext)) {
-        return NextResponse.json({ 
-          error: 'Неподдерживаемый формат (поддерживаются только ZIP, PDF, DOCX, XLSX, XLS)' 
-        }, { status: 400 });
+      if (!isSupportedPriceFile(originalName)) {
+        return NextResponse.json(
+          {
+            error: 'Неподдерживаемый формат (поддерживаются только ZIP, PDF, DOCX, XLSX, XLS)',
+          },
+          { status: 400 }
+        );
       }
 
-      const destPath = path.join(uploadDir, originalName);
+      const ext = path.extname(originalName).toLowerCase();
+      const storedName = buildStoredFileName(originalName, crypto.randomUUID());
+      const destPath = path.join(uploadDir, storedName);
       await writeFile(destPath, fileBuffer);
 
       filesToProcess.push({
         filePath: destPath,
-        fileName: originalName,
+        fileName: storedName,
         fileFormat: ext.substring(1),
       });
     }
 
     if (filesToProcess.length === 0) {
-      return NextResponse.json({ 
-        error: 'В загруженном файле не найдено поддерживаемых документов прайс-листов' 
-      }, { status: 400 });
+      return NextResponse.json(
+        { error: 'В загруженном файле не найдено поддерживаемых документов прайс-листов' },
+        { status: 400 }
+      );
     }
 
-    // Register price documents as pending and enqueue them
     const createdDocs: { doc_id: string; file_name: string }[] = [];
     const defaultPartnerId = await get_or_create_partner({ name: 'Нераспознанная клиника' });
 
@@ -91,13 +109,12 @@ export async function POST(req: Request) {
         effective_date: new Date(),
         parse_status: 'pending',
       });
-      
+
       createdDocs.push({
         doc_id: docId,
         file_name: item.fileName,
       });
 
-      // Enqueue document into the global sequential processor queue
       enqueueDocument({
         doc_id: docId,
         filePath: item.filePath,
@@ -108,13 +125,14 @@ export async function POST(req: Request) {
 
     return NextResponse.json({
       success: true,
-      message: isZip 
-        ? `Архив успешно распакован. Найдено и поставлено в очередь ${filesToProcess.length} файлов.` 
-        : `Файл успешно загружен и поставлен в очередь.`,
+      message: isZip
+        ? `Архив успешно распакован. Найдено и поставлено в очередь ${filesToProcess.length} файлов.`
+        : 'Файл успешно загружен и поставлен в очередь.',
       documents: createdDocs,
     });
-  } catch (error: any) {
+  } catch (error: unknown) {
     console.error('Error in upload route:', error);
-    return NextResponse.json({ error: 'Ошибка сервера при загрузке: ' + error.message }, { status: 500 });
+    const message = error instanceof Error ? error.message : String(error);
+    return NextResponse.json({ error: 'Ошибка сервера при загрузке: ' + message }, { status: 500 });
   }
 }

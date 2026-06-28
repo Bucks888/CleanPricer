@@ -2,5 +2,7 @@
   "autoCategory": true,
   "defaultCurrency": "KZT",
   "autoMatchThreshold": 0.85,
-  "manualReviewThreshold": 0.70
+  "manualReviewThreshold": 0.7,
+  "usdRate": 487,
+  "rubRate": 5
 }

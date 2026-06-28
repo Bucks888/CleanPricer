@@ -1,20 +1,32 @@
 import { NextResponse } from 'next/server';
 import { pool } from '../../db_utils';
+import { createAuthErrorResponse, requireAuthenticatedSession } from '../../auth_utils';
+import { isUuidLike } from '../../safe_utils';
 
 export async function POST(req: Request) {
   try {
-    const { item_id, is_verified, verification_note } = await req.json();
-    if (!item_id) {
-      return NextResponse.json({ error: 'Параметр item_id обязателен' }, { status: 400 });
+    if (!requireAuthenticatedSession(req.headers.get('cookie'))) {
+      return createAuthErrorResponse();
     }
 
-    const verified = is_verified !== false; // default to true
-    const note = verification_note || 'Подтверждено вручную';
+    const body = await req.json();
+    const item_id = body?.item_id;
+    const is_verified = body?.is_verified;
+    const verification_note = body?.verification_note;
+
+    if (!isUuidLike(item_id)) {
+      return NextResponse.json({ error: 'Параметр item_id обязателен и должен быть UUID' }, { status: 400 });
+    }
+
+    const verified = is_verified !== false;
+    const note = typeof verification_note === 'string' && verification_note.trim()
+      ? verification_note.trim()
+      : 'Подтверждено вручную';
 
     const res = await pool.query(
-      `UPDATE price_items 
-       SET is_verified = $1, verification_note = $2 
-       WHERE item_id = $3 
+      `UPDATE price_items
+       SET is_verified = $1, verification_note = $2
+       WHERE item_id = $3
        RETURNING *`,
       [verified, note, item_id]
     );
@@ -24,8 +36,9 @@ export async function POST(req: Request) {
     }
 
     return NextResponse.json({ success: true, item: res.rows[0] });
-  } catch (error: any) {
+  } catch (error: unknown) {
     console.error('Error in verify endpoint:', error);
-    return NextResponse.json({ error: error.message }, { status: 500 });
+    const message = error instanceof Error ? error.message : String(error);
+    return NextResponse.json({ error: message }, { status: 500 });
   }
 }

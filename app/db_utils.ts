@@ -25,6 +25,19 @@ function getMatchingThresholds() {
 
 // Запрос курсов обмена валют относительно KZT
 async function getExchangeRates(effectiveDate: string | Date): Promise<{ USD: number; RUB: number }> {
+  try {
+    const configPath = path.join(process.cwd(), 'config.json');
+    if (fs.existsSync(configPath)) {
+      const config = JSON.parse(fs.readFileSync(configPath, 'utf8'));
+      if (typeof config.usdRate === 'number' && typeof config.rubRate === 'number') {
+        console.log(`[EXCHANGE] Использование настроенных курсов: USD = ${config.usdRate} KZT, RUB = ${config.rubRate} KZT`);
+        return { USD: config.usdRate, RUB: config.rubRate };
+      }
+    }
+  } catch (e) {
+    // Игнорировать
+  }
+
   const fallback = { USD: 450.0, RUB: 5.0 };
   try {
     const response = await fetch('https://open.er-api.com/v6/latest/USD', {
@@ -35,12 +48,13 @@ async function getExchangeRates(effectiveDate: string | Date): Promise<{ USD: nu
       if (data && data.rates && data.rates.KZT) {
         const usdRate = Number(data.rates.KZT);
         const rubRate = data.rates.RUB ? Number(data.rates.KZT) / Number(data.rates.RUB) : 5.0;
-        console.log(`[EXCHANGE] Получены курсы: USD = ${usdRate.toFixed(2)} KZT, RUB = ${rubRate.toFixed(2)} KZT`);
+        console.log(`[EXCHANGE] Получены курсы из API: USD = ${usdRate.toFixed(2)} KZT, RUB = ${rubRate.toFixed(2)} KZT`);
         return { USD: usdRate, RUB: rubRate };
       }
     }
-  } catch (err: any) {
-    console.warn(`[EXCHANGE] Не удалось получить курсы валют (офлайн или таймаут): ${err.message}. Используются значения по умолчанию.`);
+  } catch (err: unknown) {
+    const message = err instanceof Error ? err.message : String(err);
+    console.warn(`[EXCHANGE] Unable to fetch exchange rates. Falling back to defaults. Error: ${message}`);
   }
   return fallback;
 }
@@ -83,7 +97,7 @@ export function diceCoefficient(str1: string, str2: string): number {
  */
 export function find_best_match(
   service_name_raw: string,
-  services: { service_id: string; service_name: string; synonyms?: any }[]
+  services: { service_id: string; service_name: string; synonyms?: string[] | string | null }[]
 ) {
   if (!service_name_raw) {
     return { service_id: null, score: 0, is_verified: false };
@@ -105,7 +119,7 @@ export function find_best_match(
       synonymsList = s.synonyms;
     } else if (typeof s.synonyms === 'string') {
       try {
-        synonymsList = JSON.parse(s.synonyms);
+        const parsed = JSON.parse(s.synonyms);
       } catch (e) {
         // Игнорировать
       }
@@ -244,7 +258,7 @@ export async function update_price_document(
   const client = await pool.connect();
   try {
     const fields: string[] = [];
-    const values: any[] = [];
+    const values: (string | number | Date | null)[] = [];
     let idx = 1;
 
     if (updates.parse_status) {
@@ -351,20 +365,6 @@ export async function save_price_items_batch(
         ? Number(rawItem.price_nonresident_original)
         : priceResOrig;
 
-      let verificationNote = '';
-      let isVerified = true;
-
-      if (!isNaN(priceNonresOrig) && priceNonresOrig < priceResOrig) {
-        logs.push({
-          type: 'warning',
-          row: rowIndex,
-          service_name: nameRaw,
-          message: `Цена нерезидента (${priceNonresOrig}) меньше цены резидента (${priceResOrig}).`
-        });
-        isVerified = false;
-        verificationNote += `Цена нерезидента меньше цены резидента. `;
-      }
-
       // Нормализация валюты и расчет цен в KZT
       const rawCurrency = (rawItem.currency_original || 'KZT').trim().toUpperCase();
       let rate = 1.0;
@@ -379,7 +379,23 @@ export async function save_price_items_batch(
       }
 
       const priceResidentKzt = priceResOrig * rate;
-      const priceNonresidentKzt = priceNonresOrig * rate;
+      const priceNonresidentKzt = priceNonresOrig; // Не конвертируем, сохраняем в оригинальной валюте
+
+      let verificationNote = '';
+      let isVerified = true;
+
+      // Для сравнения резидента и нерезидента приводим оба к KZT
+      const priceNonresKztVal = priceNonresOrig * rate;
+      if (!isNaN(priceNonresOrig) && priceNonresKztVal < priceResidentKzt) {
+        logs.push({
+          type: 'warning',
+          row: rowIndex,
+          service_name: nameRaw,
+          message: `Цена нерезидента (${priceNonresOrig} ${rawCurrency}) меньше цены резидента (${priceResOrig} ${rawCurrency}).`
+        });
+        isVerified = false;
+        verificationNote += `Цена нерезидента меньше цены резидента. `;
+      }
 
       // Поиск соответствия в справочнике услуг
       const matchResult = find_best_match(nameRaw, servicesCatalog);
@@ -397,7 +413,7 @@ export async function save_price_items_batch(
 
       // Проверка аномалий изменения цены более чем на 50%
       let prevPriceQuery = '';
-      let prevQueryParams: any[] = [];
+      let prevQueryParams: (string | number)[] = [];
 
       if (serviceId) {
         prevPriceQuery = `
@@ -501,21 +517,10 @@ export async function save_price_items_batch(
   }
 }
 
-// Заглушка обратной совместимости для одиночного сохранения услуг
-export async function save_price_item(doc_name: string, data: any) {
-  const partnerId = await get_or_create_partner({ name: "Дефолтный партнер" });
-  const docId = await save_price_document({
-    partner_id: partnerId,
-    file_name: doc_name,
-    file_format: 'xlsx',
-    effective_date: new Date(),
-    parse_status: 'processing'
-  });
-  await save_price_items_batch(docId, partnerId, new Date(), [
-    {
-      service_name_raw: data.name,
-      price_original: data.price,
-      currency_original: 'KZT'
-    }
-  ]);
-}
+// Заглушка обратной совместимости для одиночного сохранения услуг (исправлена)
+export type LegacyPriceInput = {
+  service_name_raw: string;
+  price_original: number;
+  currency_original?: string;
+};
+

@@ -1,22 +1,18 @@
 'use client';
 
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import {
   Sparkles,
-  Check,
   RefreshCw,
   ArrowRight,
   Database,
-  AlertCircle,
   Settings,
   Search,
   ChevronLeft,
-  ChevronDown,
   Activity,
   History,
   TrendingUp,
-  FileSpreadsheet,
   FileArchive,
   UploadCloud,
   FileText,
@@ -37,7 +33,10 @@ import {
   MapPin,
   Map,
   Plus,
-  Download
+  Download,
+  LogIn,
+  Shield,
+  LockKeyhole
 } from 'lucide-react';
 
 // Live dashboard stats type
@@ -73,7 +72,7 @@ interface PriceDocument {
 interface CatalogService {
   service_id: string;
   service_name: string;
-  synonyms: any;
+  synonyms: string[];
   category: string;
   icd_code?: string;
   is_active: boolean;
@@ -92,6 +91,44 @@ interface ClinicPartner {
   created_at: string;
 }
 
+type ActiveTab =
+  | 'dashboard'
+  | 'archive_processing'
+  | 'price_documents'
+  | 'verification_queue'
+  | 'service_catalog'
+  | 'partners'
+  | 'price_explorer'
+  | 'unmatched_services'
+  | 'api_center'
+  | 'settings';
+
+type SettingsUpdate = Partial<{
+  autoCategory: boolean;
+  defaultCurrency: string;
+  autoMatchThreshold: number;
+  manualReviewThreshold: number;
+  usdRate: number;
+  rubRate: number;
+}>;
+
+type ExplorerClinicResult = {
+  partner_id: string;
+  partner_name: string;
+  price_resident_kzt: number;
+  price_nonresident_kzt: number;
+  price_original: number;
+  currency_original: string;
+  effective_date: string;
+  is_verified: boolean;
+  verification_note?: string;
+  city?: string;
+  address?: string;
+  bin?: string;
+  contact_email?: string;
+  contact_phone?: string;
+};
+
 // Live price item type
 interface PriceItem {
   item_id: string;
@@ -106,6 +143,7 @@ interface PriceItem {
   price_original: number;
   currency_original: string;
   is_verified: boolean;
+  is_active?: boolean;
   verification_note?: string;
   effective_date: string;
   partner_name?: string;
@@ -120,7 +158,11 @@ function renderStructuredLogs(logString: string) {
   }
 
   try {
-    const logs = JSON.parse(cleanLog) as any[];
+    const logs = JSON.parse(cleanLog) as Array<{
+      type?: string;
+      row?: string | number;
+      message?: string;
+    }>;
     if (logs.length === 0) return <span className="text-slate-400">Лог чист</span>;
 
     return (
@@ -139,7 +181,7 @@ function renderStructuredLogs(logString: string) {
             </span>
             <span className="truncate">
               {log.row ? `Стр. ${log.row}: ` : ''}
-              {log.message}
+              {log.message ?? ''}
             </span>
           </div>
         ))}
@@ -156,18 +198,7 @@ function renderStructuredLogs(logString: string) {
 }
 
 export default function Dashboard() {
-  const [activeTab, setActiveTab] = useState<
-    | 'dashboard'
-    | 'archive_processing'
-    | 'price_documents'
-    | 'verification_queue'
-    | 'service_catalog'
-    | 'partners'
-    | 'price_explorer'
-    | 'unmatched_services'
-    | 'api_center'
-    | 'settings'
-  >('dashboard');
+  const [activeTab, setActiveTab] = useState<ActiveTab>('dashboard');
 
   const [isSidebarExpanded, setIsSidebarExpanded] = useState(true);
   
@@ -194,7 +225,6 @@ export default function Dashboard() {
   // Selection and Search states
   const [searchQuery, setSearchQuery] = useState('');
   const [categoryFilter, setCategoryFilter] = useState('ALL');
-  const [selectedPartnerId, setSelectedPartnerId] = useState<string>('ALL');
   const [toast, setToast] = useState<{ message: string; type: 'success' | 'info' | 'error' } | null>(null);
 
   // Unmatched Mapping screen states
@@ -212,17 +242,25 @@ export default function Dashboard() {
     services: []
   });
   const [selectedExplorerService, setSelectedExplorerService] = useState<CatalogService | null>(null);
-  const [explorerServiceClinics, setExplorerServiceClinics] = useState<any[]>([]);
+  const [explorerServiceClinics, setExplorerServiceClinics] = useState<ExplorerClinicResult[]>([]);
 
   // Settings
   const [autoCategory, setAutoCategory] = useState(true);
   const [defaultCurrency, setDefaultCurrency] = useState('KZT');
   const [autoMatchThreshold, setAutoMatchThreshold] = useState(0.85);
   const [manualReviewThreshold, setManualReviewThreshold] = useState(0.70);
+  const [usdRate, setUsdRate] = useState(450.0);
+  const [rubRate, setRubRate] = useState(5.0);
+
+  const [authState, setAuthState] = useState<'loading' | 'authed' | 'guest'>('loading');
+  const [loginUsername, setLoginUsername] = useState('admin');
+  const [loginPassword, setLoginPassword] = useState('');
+  const [authError, setAuthError] = useState('');
+  const [authSubmitting, setAuthSubmitting] = useState(false);
 
   // Price History Modal States
   const [historyModalOpen, setHistoryModalOpen] = useState(false);
-  const [historyItems, setHistoryItems] = useState<any[]>([]);
+  const [historyItems, setHistoryItems] = useState<PriceItem[]>([]);
   const [historyPartnerName, setHistoryPartnerName] = useState('');
   const [historyServiceName, setHistoryServiceName] = useState('');
 
@@ -236,14 +274,409 @@ export default function Dashboard() {
         setDefaultCurrency(config.defaultCurrency ?? 'KZT');
         setAutoMatchThreshold(config.autoMatchThreshold ?? 0.85);
         setManualReviewThreshold(config.manualReviewThreshold ?? 0.70);
+        setUsdRate(config.usdRate ?? 450.0);
+        setRubRate(config.rubRate ?? 5.0);
       }
     } catch (e) {
       console.error('Error fetching settings:', e);
     }
   };
 
+  // Editing Modal States
+  const [editingItem, setEditingItem] = useState<any>(null);
+  const [editFormName, setEditFormName] = useState('');
+  const [editFormResPrice, setEditFormResPrice] = useState<number | string>('');
+  const [editFormNonresPrice, setEditFormNonresPrice] = useState<number | string>('');
+  const [editFormCurrency, setEditFormCurrency] = useState('KZT');
+  const [editFormServiceId, setEditFormServiceId] = useState<string | null>(null);
+  const [editFormNote, setEditFormNote] = useState('');
+  const [editFormVerified, setEditFormVerified] = useState(false);
+  const [editFormSearch, setEditFormSearch] = useState('');
+  const [editSubmitting, setEditSubmitting] = useState(false);
+
+  // Undo history state
+  const [undoHistory, setUndoHistory] = useState<{
+    id: string;
+    type: 'match' | 'verify' | 'edit';
+    itemId: string;
+    itemNameRaw: string;
+    oldState: any;
+    timestamp: string;
+  }[]>([]);
+
+  // Load undo history on mount
+  useEffect(() => {
+    try {
+      const stored = localStorage.getItem('cleanpricer_undo_history');
+      if (stored) {
+        setUndoHistory(JSON.parse(stored));
+      }
+    } catch (e) {}
+  }, []);
+
+  const addUndoAction = (action: any) => {
+    const updated = [action, ...undoHistory].slice(0, 10);
+    setUndoHistory(updated);
+    try {
+      localStorage.setItem('cleanpricer_undo_history', JSON.stringify(updated));
+    } catch (e) {}
+  };
+
+  const handleUndo = async (action: any) => {
+    try {
+      const res = await fetch('/api/edit-item', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          item_id: action.itemId,
+          service_id: action.oldState.service_id,
+          service_name_raw: action.oldState.service_name_raw,
+          price_resident_kzt: action.oldState.price_resident_kzt,
+          price_nonresident_kzt: action.oldState.price_nonresident_kzt,
+          currency_original: action.oldState.currency_original,
+          is_verified: action.oldState.is_verified,
+          verification_note: action.oldState.verification_note
+        }),
+      });
+
+      if (res.ok) {
+        const typeRu = action.type === 'match' ? 'Сопоставление' : action.type === 'verify' ? 'Верификация' : 'Редактирование';
+        showToast(`Действие "${typeRu}" отменено!`, 'success');
+        const updated = undoHistory.filter(a => a.id !== action.id);
+        setUndoHistory(updated);
+        try {
+          localStorage.setItem('cleanpricer_undo_history', JSON.stringify(updated));
+        } catch (e) {}
+        refreshAllData();
+      } else {
+        showToast('Ошибка при отмене действия', 'error');
+      }
+    } catch (e) {
+      showToast('Сбой соединения при отмене', 'error');
+    }
+  };
+
+  const startEditingItem = (item: any) => {
+    setEditingItem(item);
+    setEditFormName(item.service_name_raw || '');
+    setEditFormResPrice(item.price_resident_kzt ?? '');
+    setEditFormNonresPrice(item.price_nonresident_kzt ?? '');
+    setEditFormCurrency(item.currency_original || 'KZT');
+    setEditFormServiceId(item.service_id || null);
+    setEditFormNote(item.verification_note || '');
+    setEditFormVerified(item.is_verified ?? false);
+    
+    // Find the name of the service if matched
+    const matchedService = services.find(s => s.service_id === item.service_id);
+    setEditFormSearch(matchedService ? matchedService.service_name : '');
+  };
+
+  const handleEditSubmit = async () => {
+    if (!editingItem) return;
+
+    const originalState = {
+      item_id: editingItem.item_id,
+      service_id: editingItem.service_id,
+      service_name_raw: editingItem.service_name_raw,
+      price_resident_kzt: editingItem.price_resident_kzt,
+      price_nonresident_kzt: editingItem.price_nonresident_kzt,
+      currency_original: editingItem.currency_original,
+      is_verified: editingItem.is_verified,
+      verification_note: editingItem.verification_note
+    };
+
+    setEditSubmitting(true);
+    try {
+      const res = await fetch('/api/edit-item', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          item_id: editingItem.item_id,
+          service_id: editFormServiceId,
+          service_name_raw: editFormName,
+          price_resident_kzt: editFormResPrice === '' ? null : Number(editFormResPrice),
+          price_nonresident_kzt: editFormNonresPrice === '' ? null : Number(editFormNonresPrice),
+          currency_original: editFormCurrency,
+          is_verified: editFormVerified,
+          verification_note: editFormNote || 'Отредактировано оператором'
+        }),
+      });
+
+      if (res.ok) {
+        showToast('Позиция успешно обновлена!', 'success');
+        
+        const action = {
+          id: 'action-' + Date.now() + '-' + Math.random().toString(36).substr(2, 5),
+          type: 'edit' as const,
+          itemId: editingItem.item_id,
+          itemNameRaw: editingItem.service_name_raw,
+          oldState: originalState,
+          timestamp: new Date().toISOString()
+        };
+        addUndoAction(action);
+
+        setEditingItem(null);
+        refreshAllData();
+      } else {
+        showToast('Ошибка при обновлении позиции', 'error');
+      }
+    } catch (e) {
+      showToast('Сбой соединения', 'error');
+    } finally {
+      setEditSubmitting(false);
+    }
+  };
+
+  // Partner Add/Edit modal states
+  const [partnerModalOpen, setPartnerModalOpen] = useState(false);
+  const [editingPartner, setEditingPartner] = useState<any>(null);
+  const [partnerFormName, setPartnerFormName] = useState('');
+  const [partnerFormCity, setPartnerFormCity] = useState('');
+  const [partnerFormAddress, setPartnerFormAddress] = useState('');
+  const [partnerFormBin, setPartnerFormBin] = useState('');
+  const [partnerFormEmail, setPartnerFormEmail] = useState('');
+  const [partnerFormPhone, setPartnerFormPhone] = useState('');
+  const [partnerFormActive, setPartnerFormActive] = useState(true);
+  const [partnerSubmitting, setPartnerSubmitting] = useState(false);
+
+  const startCreatingPartner = () => {
+    setEditingPartner(null);
+    setPartnerFormName('');
+    setPartnerFormCity('');
+    setPartnerFormAddress('');
+    setPartnerFormBin('');
+    setPartnerFormEmail('');
+    setPartnerFormPhone('');
+    setPartnerFormActive(true);
+    setPartnerModalOpen(true);
+  };
+
+  const startEditingPartner = (partner: any) => {
+    setEditingPartner(partner);
+    setPartnerFormName(partner.name || '');
+    setPartnerFormCity(partner.city || '');
+    setPartnerFormAddress(partner.address || '');
+    setPartnerFormBin(partner.bin || '');
+    setPartnerFormEmail(partner.contact_email || '');
+    setPartnerFormPhone(partner.contact_phone || '');
+    setPartnerFormActive(partner.is_active ?? true);
+    setPartnerModalOpen(true);
+  };
+
+  const handlePartnerSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!partnerFormName || !partnerFormCity) {
+      showToast('Название и город обязательны', 'error');
+      return;
+    }
+
+    setPartnerSubmitting(true);
+    try {
+      const isEdit = !!editingPartner;
+      const url = '/api/partners';
+      const method = isEdit ? 'PUT' : 'POST';
+      const payload = {
+        partner_id: isEdit ? editingPartner.partner_id : undefined,
+        name: partnerFormName,
+        city: partnerFormCity,
+        address: partnerFormAddress,
+        bin: partnerFormBin,
+        contact_email: partnerFormEmail,
+        contact_phone: partnerFormPhone,
+        is_active: partnerFormActive,
+      };
+
+      const res = await fetch(url, {
+        method,
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      });
+
+      if (res.ok) {
+        showToast(isEdit ? 'Данные партнера обновлены!' : 'Новый партнер добавлен!', 'success');
+        setPartnerModalOpen(false);
+        refreshAllData();
+      } else {
+        const data = await res.json();
+        showToast(data.error || 'Ошибка сохранения', 'error');
+      }
+    } catch (err) {
+      showToast('Сбой соединения', 'error');
+    } finally {
+      setPartnerSubmitting(false);
+    }
+  };
+
+  const handleDeletePartner = async (partnerId: string) => {
+    if (!confirm('Вы уверены, что хотите удалить/деактивировать этого партнера?')) return;
+
+    try {
+      const res = await fetch(`/api/partners?partner_id=${partnerId}`, {
+        method: 'DELETE',
+      });
+
+      if (res.ok) {
+        const data = await res.json();
+        showToast(data.message || 'Партнер успешно удален', 'success');
+        refreshAllData();
+      } else {
+        const data = await res.json();
+        showToast(data.error || 'Ошибка удаления', 'error');
+      }
+    } catch (err) {
+      showToast('Сбой соединения', 'error');
+    }
+  };
+
+  // Service Catalog Add/Edit modal states
+  const [serviceModalOpen, setServiceModalOpen] = useState(false);
+  const [editingService, setEditingService] = useState<any>(null);
+  const [serviceFormName, setServiceFormName] = useState('');
+  const [serviceFormCategory, setServiceFormCategory] = useState('');
+  const [serviceFormSynonyms, setServiceFormSynonyms] = useState('');
+  const [serviceFormIcd, setServiceFormIcd] = useState('');
+  const [serviceFormActive, setServiceFormActive] = useState(true);
+  const [serviceSubmitting, setServiceSubmitting] = useState(false);
+
+  const startCreatingService = () => {
+    setEditingService(null);
+    setServiceFormName('');
+    setServiceFormCategory('');
+    setServiceFormSynonyms('');
+    setServiceFormIcd('');
+    setServiceFormActive(true);
+    setServiceModalOpen(true);
+  };
+
+  const startEditingService = (service: any) => {
+    setEditingService(service);
+    setServiceFormName(service.service_name || '');
+    setServiceFormCategory(service.category || '');
+    
+    let synText = '';
+    try {
+      const synList = typeof service.synonyms === 'string' ? JSON.parse(service.synonyms) : (service.synonyms || []);
+      synText = Array.isArray(synList) ? synList.join(', ') : '';
+    } catch(e) {}
+    
+    setServiceFormSynonyms(synText);
+    setServiceFormIcd(service.icd_code || '');
+    setServiceFormActive(service.is_active ?? true);
+    setServiceModalOpen(true);
+  };
+
+  const handleServiceSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!serviceFormName || !serviceFormCategory) {
+      showToast('Название и категория обязательны', 'error');
+      return;
+    }
+
+    setServiceSubmitting(true);
+    try {
+      const isEdit = !!editingService;
+      const url = '/api/services';
+      const method = isEdit ? 'PUT' : 'POST';
+      const payload = {
+        service_id: isEdit ? editingService.service_id : undefined,
+        service_name: serviceFormName,
+        category: serviceFormCategory,
+        synonyms: serviceFormSynonyms,
+        icd_code: serviceFormIcd,
+        is_active: serviceFormActive,
+      };
+
+      const res = await fetch(url, {
+        method,
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      });
+
+      if (res.ok) {
+        showToast(isEdit ? 'Данные услуги обновлены!' : 'Новая услуга добавлена!', 'success');
+        setServiceModalOpen(false);
+        refreshAllData();
+      } else {
+        const data = await res.json();
+        showToast(data.error || 'Ошибка сохранения', 'error');
+      }
+    } catch (err) {
+      showToast('Сбой соединения', 'error');
+    } finally {
+      setServiceSubmitting(false);
+    }
+  };
+
+  const handleDeleteService = async (serviceId: string) => {
+    if (!confirm('Вы уверены, что хотите удалить/деактивировать эту услугу?')) return;
+
+    try {
+      const res = await fetch(`/api/services?service_id=${serviceId}`, {
+        method: 'DELETE',
+      });
+
+      if (res.ok) {
+        const data = await res.json();
+        showToast(data.message || 'Услуга успешно удалена', 'success');
+        refreshAllData();
+      } else {
+        const data = await res.json();
+        showToast(data.error || 'Ошибка удаления', 'error');
+      }
+    } catch (err) {
+      showToast('Сбой соединения', 'error');
+    }
+  };
+
+  const fetchAuthSession = async () => {
+    try {
+      const res = await fetch('/api/auth/session');
+      if (res.ok) {
+        setAuthState('authed');
+        setAuthError('');
+      } else {
+        setAuthState('guest');
+      }
+    } catch (error: unknown) {
+      setAuthState('guest');
+    }
+  };
+
+  const handleLogin = async (event: React.FormEvent) => {
+    event.preventDefault();
+    setAuthSubmitting(true);
+    setAuthError('');
+
+    try {
+      const res = await fetch('/api/auth/login', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          username: loginUsername,
+          password: loginPassword,
+        }),
+      });
+
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}));
+        setAuthError(data.error || 'Не удалось войти');
+        setAuthState('guest');
+        return;
+      }
+
+      await res.json();
+      setLoginPassword('');
+      setAuthState('authed');
+    } catch (error: unknown) {
+      setAuthError('Сбой соединения');
+      setAuthState('guest');
+    } finally {
+      setAuthSubmitting(false);
+    }
+  };
+
   // Save settings via API
-  const handleSaveSettings = async (updates: any) => {
+  const handleSaveSettings = async (updates: SettingsUpdate) => {
     try {
       const res = await fetch('/api/settings', {
         method: 'POST',
@@ -257,6 +690,8 @@ export default function Dashboard() {
         setDefaultCurrency(data.config.defaultCurrency);
         setAutoMatchThreshold(data.config.autoMatchThreshold);
         setManualReviewThreshold(data.config.manualReviewThreshold);
+        setUsdRate(data.config.usdRate);
+        setRubRate(data.config.rubRate);
       } else {
         showToast('Ошибка сохранения настроек', 'error');
       }
@@ -266,7 +701,7 @@ export default function Dashboard() {
   };
 
   // Fetch partner prices history
-  const handleViewHistory = async (clinic: any) => {
+  const handleViewHistory = async (clinic: ExplorerClinicResult) => {
     setHistoryPartnerName(clinic.partner_name);
     setHistoryServiceName(selectedExplorerService?.service_name || '');
     try {
@@ -318,7 +753,7 @@ export default function Dashboard() {
   // Fetch Catalog Services
   const fetchCatalogServices = async () => {
     try {
-      const res = await fetch('/api/services');
+      const res = await fetch('/api/services?include_inactive=true');
       if (res.ok) {
         const data = await res.json();
         setServices(data);
@@ -354,34 +789,12 @@ export default function Dashboard() {
     }
   };
 
-  // Fetch Verification Queue (Unverified active items)
-  const fetchVerificationQueue = async () => {
-    try {
-      const res = await poolQuery(`
-        SELECT pi.*, p.name as partner_name, pd.file_name
-        FROM price_items pi
-        JOIN partners p ON pi.partner_id = p.partner_id
-        JOIN price_documents pd ON pi.doc_id = pd.doc_id
-        WHERE pi.is_verified = false AND pi.is_active = true
-        ORDER BY pi.effective_date DESC
-      `);
-      setVerifiedItems(res);
-    } catch (e) {
-      console.error(e);
-    }
-  };
-
-  // Direct SQL Helper for verification queue (since we are on client side next.js, we simulate it or fetch it)
-  // To keep it clean, we can fetch all unverified items. Let's write an API or query it inside a custom route.
-  // Wait, let's look at `/api/unmatched` - it returns where `service_id` is null (which are always unverified).
-  // What about items that are matched but have anomaly warnings or resident rule violations?
-  // We can write a quick endpoint to query them, or we can just filter unmatched/unverified. Let's make an API call to a route `/api/unverified` or query it directly. Let's just create an API route for unverified items!
-  // To be super safe and not require another file, we can retrieve all items that are unverified from the backend by filtering the documents list or unmatched. Actually, since we want a dedicated Verification Queue screen, let's create a quick API endpoint `/api/unverified/route.ts` if needed.
-  // Wait, we can fetch unmatched items and other items needing verification. Let's check how we can retrieve them.
-  // We can write a route for `/api/unverified` now. That is very clean!
-
   // Load All Dashboard Data
   const refreshAllData = async () => {
+    if (authState !== 'authed') {
+      return;
+    }
+
     await fetchDashboardStats();
     await fetchDocuments();
     await fetchCatalogServices();
@@ -400,11 +813,27 @@ export default function Dashboard() {
   };
 
   useEffect(() => {
-    refreshAllData();
+    const timer = window.setTimeout(() => {
+      void fetchAuthSession();
+    }, 0);
+    return () => window.clearTimeout(timer);
   }, []);
+
+  useEffect(() => {
+    if (authState === 'authed') {
+      const timer = window.setTimeout(() => {
+        void refreshAllData();
+      }, 0);
+      return () => window.clearTimeout(timer);
+    }
+  }, [authState]);
 
   // Poll for document processing updates
   useEffect(() => {
+    if (authState !== 'authed') {
+      return;
+    }
+
     const isProcessing = documents.some(
       (d) => d.parse_status === 'pending' || d.parse_status === 'processing'
     );
@@ -417,7 +846,7 @@ export default function Dashboard() {
     }, 3000);
 
     return () => clearInterval(interval);
-  }, [documents]);
+  }, [documents, authState]);
 
   // Handle Price List / ZIP Archive Upload
   const handleUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -456,8 +885,8 @@ export default function Dashboard() {
         showToast(errData.error || 'Ошибка при загрузке файла', 'error');
         setUploading(false);
       }
-    } catch (err: any) {
-      console.error(err);
+    } catch (error: unknown) {
+      console.error(error);
       showToast('Сбой сети при загрузке', 'error');
       setUploading(false);
     }
@@ -497,6 +926,17 @@ export default function Dashboard() {
   const handleManualMatchSubmit = async (serviceId: string) => {
     if (!selectedUnmatchedItem) return;
 
+    const originalState = {
+      item_id: selectedUnmatchedItem.item_id,
+      service_id: selectedUnmatchedItem.service_id,
+      service_name_raw: selectedUnmatchedItem.service_name_raw,
+      price_resident_kzt: selectedUnmatchedItem.price_resident_kzt,
+      price_nonresident_kzt: selectedUnmatchedItem.price_nonresident_kzt,
+      currency_original: selectedUnmatchedItem.currency_original,
+      is_verified: selectedUnmatchedItem.is_verified,
+      verification_note: selectedUnmatchedItem.verification_note
+    };
+
     try {
       const res = await fetch('/api/match', {
         method: 'POST',
@@ -510,6 +950,17 @@ export default function Dashboard() {
 
       if (res.ok) {
         showToast('Позиция успешно сопоставлена!', 'success');
+
+        const action = {
+          id: 'action-' + Date.now() + '-' + Math.random().toString(36).substr(2, 5),
+          type: 'match' as const,
+          itemId: selectedUnmatchedItem.item_id,
+          itemNameRaw: selectedUnmatchedItem.service_name_raw,
+          oldState: originalState,
+          timestamp: new Date().toISOString()
+        };
+        addUndoAction(action);
+
         setSelectedUnmatchedItem(null);
         setMappingSearch('');
         setMappingNote('');
@@ -554,17 +1005,6 @@ export default function Dashboard() {
     }
   };
 
-  // Helper function simulation of query for client side list
-  async function poolQuery(sql: string) {
-    // In order to avoid writing inline pg pools on the client, we query an endpoint.
-    // We will build a unified API endpoint for unverified items: `/api/unverified`
-    const res = await fetch('/api/unverified');
-    if (res.ok) {
-      return await res.json();
-    }
-    return [];
-  }
-
   // Filtered lists for simple clientside searches
   const filteredCatalog = services.filter((s) => {
     const matchesSearch = s.service_name.toLowerCase().includes(searchQuery.toLowerCase()) ||
@@ -581,6 +1021,78 @@ export default function Dashboard() {
   // Extract unique categories from catalog for dropdowns
   const categoriesList = Array.from(new Set(services.map((s) => s.category))).filter(Boolean);
   const citiesList = Array.from(new Set(partners.map((p) => p.city))).filter(Boolean);
+
+  if (authState !== 'authed') {
+    return (
+      <div className="min-h-screen w-full bg-slate-950 text-white flex items-center justify-center px-4">
+        <div className="w-full max-w-md border border-white/10 bg-slate-900/90 rounded-3xl p-8 shadow-2xl">
+          <div className="flex items-center gap-3 mb-6">
+            <div className="w-12 h-12 rounded-2xl bg-indigo-500/15 border border-indigo-400/20 flex items-center justify-center">
+              <Shield className="w-6 h-6 text-indigo-300" />
+            </div>
+            <div>
+              <p className="text-[11px] uppercase tracking-[0.2em] text-slate-400">MedPartners</p>
+              <h1 className="text-2xl font-bold text-white">Вход в систему</h1>
+            </div>
+          </div>
+
+          {authState === 'loading' ? (
+            <div className="py-10 flex flex-col items-center gap-3 text-slate-300">
+              <div className="w-10 h-10 rounded-full border-2 border-slate-700 border-t-indigo-400 animate-spin" />
+              <p className="text-sm">Проверяем сессию</p>
+            </div>
+          ) : (
+            <form onSubmit={handleLogin} className="space-y-4">
+              <label className="block">
+                <span className="block text-xs font-semibold text-slate-300 mb-2">Логин</span>
+                <input
+                  value={loginUsername}
+                  onChange={(e) => setLoginUsername(e.target.value)}
+                  autoComplete="username"
+                  className="w-full h-11 rounded-xl bg-slate-950 border border-slate-700 px-3 text-sm text-white outline-none focus:border-indigo-400"
+                />
+              </label>
+
+              <label className="block">
+                <span className="block text-xs font-semibold text-slate-300 mb-2">Пароль</span>
+                <input
+                  type="password"
+                  value={loginPassword}
+                  onChange={(e) => setLoginPassword(e.target.value)}
+                  autoComplete="current-password"
+                  className="w-full h-11 rounded-xl bg-slate-950 border border-slate-700 px-3 text-sm text-white outline-none focus:border-indigo-400"
+                />
+              </label>
+
+              {authError && (
+                <div className="rounded-xl border border-rose-500/30 bg-rose-500/10 px-3 py-2 text-xs text-rose-200">
+                  {authError}
+                </div>
+              )}
+
+              <button
+                type="submit"
+                disabled={authSubmitting}
+                className="w-full h-11 rounded-xl bg-indigo-500 text-white font-semibold flex items-center justify-center gap-2 hover:bg-indigo-400 disabled:opacity-60 disabled:cursor-not-allowed"
+              >
+                {authSubmitting ? (
+                  <span className="w-4 h-4 rounded-full border-2 border-white/40 border-t-white animate-spin" />
+                ) : (
+                  <LogIn className="w-4 h-4" />
+                )}
+                <span>{authSubmitting ? 'Входим...' : 'Войти'}</span>
+              </button>
+
+              <div className="flex items-center gap-2 text-[11px] text-slate-400 pt-2">
+                <LockKeyhole className="w-3.5 h-3.5" />
+                <span>После входа откроется административный раздел и API-запросы.</span>
+              </div>
+            </form>
+          )}
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="h-screen w-screen bg-[#f8fafc] text-[#1e293b] font-sans antialiased overflow-hidden flex p-4" id="medpartners-layout">
@@ -644,7 +1156,7 @@ export default function Dashboard() {
                     <tr key={idx} className={`border-b border-slate-100 h-9 hover:bg-slate-50/80 ${item.is_active ? 'bg-indigo-50/20 font-semibold text-indigo-900' : 'text-slate-500'}`}>
                       <td className="px-3">{new Date(item.effective_date).toLocaleDateString()}</td>
                       <td className="px-3">{item.price_resident_kzt} KZT</td>
-                      <td className="px-3">{item.price_nonresident_kzt} KZT</td>
+                      <td className="px-3">{item.price_nonresident_kzt} {item.currency_original || 'KZT'}</td>
                       <td className="px-3 truncate max-w-[120px]" title={item.file_name}>{item.file_name}</td>
                       <td className="px-3 text-center">
                         <span className={`px-1.5 py-0.5 rounded text-[9px] ${item.is_active ? 'bg-emerald-50 text-emerald-700 border border-emerald-200' : 'bg-slate-100 text-slate-400'}`}>
@@ -676,6 +1188,411 @@ export default function Dashboard() {
         </div>
       )}
 
+      {/* Edit Price Item Modal */}
+      {editingItem && (
+        <div className="fixed inset-0 bg-slate-900/60 backdrop-blur-xs flex items-center justify-center z-50 p-4">
+          <div className="bg-white rounded-3xl p-6 max-w-xl w-full border border-slate-150 shadow-2xl flex flex-col max-h-[90vh]">
+            <div className="flex items-center justify-between border-b border-slate-100 pb-3 flex-shrink-0">
+              <div>
+                <h3 className="font-bold text-slate-800 text-sm">Редактирование позиции прайса</h3>
+                <p className="text-[11px] text-slate-400 mt-0.5">ID: {editingItem.item_id}</p>
+              </div>
+              <button
+                onClick={() => setEditingItem(null)}
+                className="w-7 h-7 bg-slate-100 text-slate-500 rounded-lg flex items-center justify-center hover:bg-slate-200 cursor-pointer transition"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            <div className="flex-1 overflow-y-auto custom-scrollbar my-4 pr-1 flex flex-col gap-4 text-xs">
+              <div className="flex flex-col gap-1">
+                <label className="font-semibold text-slate-700">Исходное наименование:</label>
+                <input
+                  type="text"
+                  value={editFormName}
+                  onChange={(e) => setEditFormName(e.target.value)}
+                  className="w-full h-10 px-3 bg-white border border-slate-200 rounded-xl focus:outline-none focus:ring-1 focus:ring-indigo-500"
+                />
+              </div>
+
+              <div className="grid grid-cols-2 gap-4">
+                <div className="flex flex-col gap-1">
+                  <label className="font-semibold text-slate-700">Цена для резидентов (KZT):</label>
+                  <input
+                    type="number"
+                    value={editFormResPrice}
+                    onChange={(e) => setEditFormResPrice(e.target.value)}
+                    className="w-full h-10 px-3 bg-white border border-slate-200 rounded-xl focus:outline-none focus:ring-1 focus:ring-indigo-500 font-bold"
+                  />
+                </div>
+                <div className="flex flex-col gap-1">
+                  <label className="font-semibold text-slate-700">Цена для нерезидентов:</label>
+                  <input
+                    type="number"
+                    value={editFormNonresPrice}
+                    onChange={(e) => setEditFormNonresPrice(e.target.value)}
+                    className="w-full h-10 px-3 bg-white border border-slate-200 rounded-xl focus:outline-none focus:ring-1 focus:ring-indigo-500 font-bold"
+                  />
+                </div>
+              </div>
+
+              <div className="grid grid-cols-2 gap-4">
+                <div className="flex flex-col gap-1">
+                  <label className="font-semibold text-slate-700">Оригинальная валюта:</label>
+                  <select
+                    value={editFormCurrency}
+                    onChange={(e) => setEditFormCurrency(e.target.value)}
+                    className="w-full h-10 px-3 bg-white border border-slate-200 rounded-xl focus:outline-none focus:ring-1 focus:ring-indigo-500 cursor-pointer"
+                  >
+                    <option value="KZT">KZT</option>
+                    <option value="USD">USD</option>
+                    <option value="RUB">RUB</option>
+                  </select>
+                </div>
+                <div className="flex items-center gap-2 pt-6">
+                  <input
+                    type="checkbox"
+                    id="editFormVerified"
+                    checked={editFormVerified}
+                    onChange={(e) => setEditFormVerified(e.target.checked)}
+                    className="w-4 h-4 text-indigo-600 border-slate-300 rounded focus:ring-indigo-500 cursor-pointer"
+                  />
+                  <label htmlFor="editFormVerified" className="font-semibold text-slate-700 cursor-pointer select-none">
+                    Позиция верифицирована
+                  </label>
+                </div>
+              </div>
+
+              {/* Catalog Matching Search */}
+              <div className="flex flex-col gap-1 border-t border-slate-100 pt-3">
+                <div className="flex items-center justify-between">
+                  <label className="font-semibold text-slate-700">Сопоставить со справочником:</label>
+                  {editFormServiceId && (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setEditFormServiceId(null);
+                        setEditFormSearch('');
+                      }}
+                      className="text-[10px] text-rose-600 hover:text-rose-800 font-semibold"
+                    >
+                      Очистить сопоставление
+                    </button>
+                  )}
+                </div>
+                <div className="relative">
+                  <Search className="w-4 h-4 text-slate-400 absolute left-3 top-3" />
+                  <input
+                    type="text"
+                    value={editFormSearch}
+                    onChange={(e) => {
+                      setEditFormSearch(e.target.value);
+                    }}
+                    placeholder="Поиск в каталоге услуг..."
+                    className="w-full h-10 pl-9 pr-4 bg-white border border-slate-200 rounded-xl focus:outline-none focus:ring-1 focus:ring-indigo-500"
+                  />
+                </div>
+                
+                {/* Autocomplete list */}
+                {editFormSearch.trim() !== '' && (
+                  <div className="mt-1 max-h-[140px] overflow-y-auto border border-slate-150 rounded-xl divide-y divide-slate-100 custom-scrollbar bg-slate-50">
+                    {services
+                      .filter((s) => s.service_name.toLowerCase().includes(editFormSearch.toLowerCase()))
+                      .slice(0, 5)
+                      .map((s, idx) => (
+                        <button
+                          type="button"
+                          key={idx}
+                          onClick={() => {
+                            setEditFormServiceId(s.service_id);
+                            setEditFormSearch(s.service_name);
+                          }}
+                          className="w-full text-left p-2.5 hover:bg-indigo-50/50 flex items-center justify-between text-[11px] transition cursor-pointer"
+                        >
+                          <div>
+                            <p className="font-semibold text-slate-800">{s.service_name}</p>
+                            <span className="text-[9px] text-slate-400 bg-slate-150 px-1 py-0.2 rounded mt-0.5 inline-block">
+                              {s.category}
+                            </span>
+                          </div>
+                          {editFormServiceId === s.service_id && (
+                            <CheckCircle2 className="w-3.5 h-3.5 text-emerald-500" />
+                          )}
+                        </button>
+                      ))}
+                    {services.filter((s) => s.service_name.toLowerCase().includes(editFormSearch.toLowerCase())).length === 0 && (
+                      <div className="p-3 text-center text-slate-400">Ничего не найдено</div>
+                    )}
+                  </div>
+                )}
+              </div>
+
+              <div className="flex flex-col gap-1 border-t border-slate-100 pt-3">
+                <label className="font-semibold text-slate-700">Примечание к верификации:</label>
+                <textarea
+                  value={editFormNote}
+                  onChange={(e) => setEditFormNote(e.target.value)}
+                  placeholder="Причина предупреждения или комментарий ручной обработки..."
+                  className="w-full h-16 p-3 bg-white border border-slate-200 rounded-xl focus:outline-none focus:ring-1 focus:ring-indigo-500 resize-none"
+                />
+              </div>
+            </div>
+
+            <div className="flex justify-end gap-3 flex-shrink-0 pt-3 border-t border-slate-100">
+              <button
+                type="button"
+                onClick={() => setEditingItem(null)}
+                className="h-10 px-4 bg-slate-100 hover:bg-slate-200 text-slate-700 font-bold rounded-xl text-xs cursor-pointer transition"
+              >
+                Отмена
+              </button>
+              <button
+                type="button"
+                disabled={editSubmitting}
+                onClick={handleEditSubmit}
+                className="h-10 px-5 bg-indigo-600 hover:bg-indigo-700 disabled:bg-indigo-400 text-white font-bold rounded-xl text-xs cursor-pointer transition flex items-center gap-1.5"
+              >
+                {editSubmitting ? 'Сохранение...' : 'Сохранить изменения'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Partner Add/Edit Modal */}
+      {partnerModalOpen && (
+        <div className="fixed inset-0 bg-slate-900/60 backdrop-blur-xs flex items-center justify-center z-50 p-4">
+          <form onSubmit={handlePartnerSubmit} className="bg-white rounded-3xl p-6 max-w-md w-full border border-slate-150 shadow-2xl flex flex-col max-h-[90vh]">
+            <div className="flex items-center justify-between border-b border-slate-100 pb-3 flex-shrink-0">
+              <div>
+                <h3 className="font-bold text-slate-800 text-sm">
+                  {editingPartner ? 'Редактировать партнера' : 'Добавить нового партнера'}
+                </h3>
+                <p className="text-[11px] text-slate-400 mt-0.5">
+                  {editingPartner ? `ID: ${editingPartner.partner_id.substring(0, 8)}...` : 'Заполните информацию о клинике'}
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => setPartnerModalOpen(false)}
+                className="w-7 h-7 bg-slate-100 text-slate-500 rounded-lg flex items-center justify-center hover:bg-slate-200 cursor-pointer transition"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            <div className="flex-1 overflow-y-auto custom-scrollbar my-4 pr-1 flex flex-col gap-4 text-xs">
+              <div className="flex flex-col gap-1">
+                <label className="font-semibold text-slate-700">Название клиники/партнера *:</label>
+                <input
+                  type="text"
+                  required
+                  value={partnerFormName}
+                  onChange={(e) => setPartnerFormName(e.target.value)}
+                  placeholder="Например, Medical Center Almaty"
+                  className="w-full h-10 px-3 bg-white border border-slate-200 rounded-xl focus:outline-none focus:ring-1 focus:ring-indigo-500"
+                />
+              </div>
+
+              <div className="grid grid-cols-2 gap-4">
+                <div className="flex flex-col gap-1">
+                  <label className="font-semibold text-slate-700">Город *:</label>
+                  <input
+                    type="text"
+                    required
+                    value={partnerFormCity}
+                    onChange={(e) => setPartnerFormCity(e.target.value)}
+                    placeholder="Например, Алматы"
+                    className="w-full h-10 px-3 bg-white border border-slate-200 rounded-xl focus:outline-none focus:ring-1 focus:ring-indigo-500"
+                  />
+                </div>
+                <div className="flex flex-col gap-1">
+                  <label className="font-semibold text-slate-700">БИН:</label>
+                  <input
+                    type="text"
+                    value={partnerFormBin}
+                    onChange={(e) => setPartnerFormBin(e.target.value)}
+                    placeholder="12-значный номер"
+                    maxLength={12}
+                    className="w-full h-10 px-3 bg-white border border-slate-200 rounded-xl focus:outline-none focus:ring-1 focus:ring-indigo-500"
+                  />
+                </div>
+              </div>
+
+              <div className="flex flex-col gap-1">
+                <label className="font-semibold text-slate-700">Фактический адрес:</label>
+                <input
+                  type="text"
+                  value={partnerFormAddress}
+                  onChange={(e) => setPartnerFormAddress(e.target.value)}
+                  placeholder="Улица, дом, офис"
+                  className="w-full h-10 px-3 bg-white border border-slate-200 rounded-xl focus:outline-none focus:ring-1 focus:ring-indigo-500"
+                />
+              </div>
+
+              <div className="grid grid-cols-2 gap-4">
+                <div className="flex flex-col gap-1">
+                  <label className="font-semibold text-slate-700">Контактный Email:</label>
+                  <input
+                    type="email"
+                    value={partnerFormEmail}
+                    onChange={(e) => setPartnerFormEmail(e.target.value)}
+                    placeholder="partner@example.com"
+                    className="w-full h-10 px-3 bg-white border border-slate-200 rounded-xl focus:outline-none focus:ring-1 focus:ring-indigo-500"
+                  />
+                </div>
+                <div className="flex flex-col gap-1">
+                  <label className="font-semibold text-slate-700">Телефон:</label>
+                  <input
+                    type="text"
+                    value={partnerFormPhone}
+                    onChange={(e) => setPartnerFormPhone(e.target.value)}
+                    placeholder="+7 (707) 123-4567"
+                    className="w-full h-10 px-3 bg-white border border-slate-200 rounded-xl focus:outline-none focus:ring-1 focus:ring-indigo-500"
+                  />
+                </div>
+              </div>
+
+              <div className="flex items-center gap-2 pt-2 border-t border-slate-100 mt-2">
+                <input
+                  type="checkbox"
+                  id="partnerFormActive"
+                  checked={partnerFormActive}
+                  onChange={(e) => setPartnerFormActive(e.target.checked)}
+                  className="w-4 h-4 text-indigo-600 border-slate-300 rounded focus:ring-indigo-500 cursor-pointer"
+                />
+                <label htmlFor="partnerFormActive" className="font-semibold text-slate-700 cursor-pointer select-none">
+                  Клиника активна (разрешить сопоставление и импорт прайсов)
+                </label>
+              </div>
+            </div>
+
+            <div className="flex justify-end gap-3 flex-shrink-0 pt-3 border-t border-slate-100">
+              <button
+                type="button"
+                onClick={() => setPartnerModalOpen(false)}
+                className="h-10 px-4 bg-slate-100 hover:bg-slate-200 text-slate-700 font-bold rounded-xl text-xs cursor-pointer transition"
+              >
+                Отмена
+              </button>
+              <button
+                type="submit"
+                disabled={partnerSubmitting}
+                className="h-10 px-5 bg-indigo-600 hover:bg-indigo-700 disabled:bg-indigo-400 text-white font-bold rounded-xl text-xs cursor-pointer transition flex items-center gap-1.5"
+              >
+                {partnerSubmitting ? 'Сохранение...' : editingPartner ? 'Сохранить' : 'Добавить'}
+              </button>
+            </div>
+          </form>
+        </div>
+      )}
+
+      {/* Service Catalog Add/Edit Modal */}
+      {serviceModalOpen && (
+        <div className="fixed inset-0 bg-slate-900/60 backdrop-blur-xs flex items-center justify-center z-50 p-4">
+          <form onSubmit={handleServiceSubmit} className="bg-white rounded-3xl p-6 max-w-md w-full border border-slate-150 shadow-2xl flex flex-col max-h-[90vh]">
+            <div className="flex items-center justify-between border-b border-slate-100 pb-3 flex-shrink-0">
+              <div>
+                <h3 className="font-bold text-slate-800 text-sm">
+                  {editingService ? 'Редактировать услугу справочника' : 'Добавить новую услугу в справочник'}
+                </h3>
+                <p className="text-[11px] text-slate-400 mt-0.5">
+                  {editingService ? `ID: ${editingService.service_id.substring(0, 8)}...` : 'Создайте новую целевую медицинскую услугу'}
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => setServiceModalOpen(false)}
+                className="w-7 h-7 bg-slate-100 text-slate-500 rounded-lg flex items-center justify-center hover:bg-slate-200 cursor-pointer transition"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            <div className="flex-1 overflow-y-auto custom-scrollbar my-4 pr-1 flex flex-col gap-4 text-xs">
+              <div className="flex flex-col gap-1">
+                <label className="font-semibold text-slate-700">Официальное наименование услуги *:</label>
+                <input
+                  type="text"
+                  required
+                  value={serviceFormName}
+                  onChange={(e) => setServiceFormName(e.target.value)}
+                  placeholder="Например, Общий анализ крови (ОАК)"
+                  className="w-full h-10 px-3 bg-white border border-slate-200 rounded-xl focus:outline-none focus:ring-1 focus:ring-indigo-500"
+                />
+              </div>
+
+              <div className="grid grid-cols-2 gap-4">
+                <div className="flex flex-col gap-1">
+                  <label className="font-semibold text-slate-700">Категория *:</label>
+                  <input
+                    type="text"
+                    required
+                    value={serviceFormCategory}
+                    onChange={(e) => setServiceFormCategory(e.target.value)}
+                    placeholder="Например, Лаборатория"
+                    className="w-full h-10 px-3 bg-white border border-slate-200 rounded-xl focus:outline-none focus:ring-1 focus:ring-indigo-500"
+                  />
+                </div>
+                <div className="flex flex-col gap-1">
+                  <label className="font-semibold text-slate-700">Код МКБ:</label>
+                  <input
+                    type="text"
+                    value={serviceFormIcd}
+                    onChange={(e) => setServiceFormIcd(e.target.value)}
+                    placeholder="Например, A09.0"
+                    className="w-full h-10 px-3 bg-white border border-slate-200 rounded-xl focus:outline-none focus:ring-1 focus:ring-indigo-500 font-mono"
+                  />
+                </div>
+              </div>
+
+              <div className="flex flex-col gap-1">
+                <label className="font-semibold text-slate-700">Синонимы (через запятую):</label>
+                <textarea
+                  value={serviceFormSynonyms}
+                  onChange={(e) => setServiceFormSynonyms(e.target.value)}
+                  placeholder="ОАК, клинический анализ крови, анализ крови с лейкоформулой"
+                  className="w-full h-16 p-3 bg-white border border-slate-200 rounded-xl focus:outline-none focus:ring-1 focus:ring-indigo-500 resize-none"
+                />
+                <span className="text-[10px] text-slate-400">Используются алгоритмом разметки для автоматического сопоставления.</span>
+              </div>
+
+              <div className="flex items-center gap-2 pt-2 border-t border-slate-100 mt-2">
+                <input
+                  type="checkbox"
+                  id="serviceFormActive"
+                  checked={serviceFormActive}
+                  onChange={(e) => setServiceFormActive(e.target.checked)}
+                  className="w-4 h-4 text-indigo-600 border-slate-300 rounded focus:ring-indigo-500 cursor-pointer"
+                />
+                <label htmlFor="serviceFormActive" className="font-semibold text-slate-700 cursor-pointer select-none">
+                  Услуга активна (отображать в поиске и справочниках)
+                </label>
+              </div>
+            </div>
+
+            <div className="flex justify-end gap-3 flex-shrink-0 pt-3 border-t border-slate-100">
+              <button
+                type="button"
+                onClick={() => setServiceModalOpen(false)}
+                className="h-10 px-4 bg-slate-100 hover:bg-slate-200 text-slate-700 font-bold rounded-xl text-xs cursor-pointer transition"
+              >
+                Отмена
+              </button>
+              <button
+                type="submit"
+                disabled={serviceSubmitting}
+                className="h-10 px-5 bg-indigo-600 hover:bg-indigo-700 disabled:bg-indigo-400 text-white font-bold rounded-xl text-xs cursor-pointer transition flex items-center gap-1.5"
+              >
+                {serviceSubmitting ? 'Сохранение...' : editingService ? 'Сохранить' : 'Добавить'}
+              </button>
+            </div>
+          </form>
+        </div>
+      )}
+
+
       {/* COLLAPSIBLE SIDEBAR */}
       <aside
         className={`h-full bg-gradient-to-b from-[#4f46e5] to-[#3730a3] rounded-3xl py-6 px-4 flex flex-col justify-between transition-all duration-300 ease-in-out z-30 select-none flex-shrink-0 border border-white/10 ${
@@ -704,38 +1621,65 @@ export default function Dashboard() {
         </div>
 
         {/* Navigation list */}
-        <nav className="flex flex-col gap-1.5 py-4 overflow-y-auto flex-1 custom-scrollbar">
-          {[
-            { id: 'dashboard', label: 'Панель управления', icon: LayoutDashboard },
-            { id: 'archive_processing', label: 'Загрузка архивов', icon: Archive },
-            { id: 'price_documents', label: 'Документы прайсов', icon: FileText },
-            { id: 'verification_queue', label: 'Очередь верификации', icon: ListChecks },
-            { id: 'unmatched_services', label: 'Несопоставленные', icon: ZapOff },
-            { id: 'service_catalog', label: 'Справочник услуг', icon: BookOpen },
-            { id: 'partners', label: 'Партнеры (Клиники)', icon: Users },
-            { id: 'price_explorer', label: 'Поиск и цены', icon: Search },
-            { id: 'api_center', label: 'Интеграция API', icon: Cpu },
-            { id: 'settings', label: 'Настройки системы', icon: Settings },
-          ].map((item) => {
-            const Icon = item.icon;
-            const isActive = activeTab === item.id;
-            return (
-              <button
-                key={item.id}
-                onClick={() => setActiveTab(item.id as any)}
-                className={`w-full h-11 rounded-xl flex items-center transition-all duration-150 cursor-pointer ${
-                  isSidebarExpanded ? 'px-3.5 gap-3' : 'justify-center'
-                } ${
-                  isActive
-                    ? 'bg-white text-[#4f46e5] shadow-md font-semibold'
-                    : 'text-white/85 hover:bg-white/10 hover:text-white'
-                }`}
-              >
-                <Icon className="w-5 h-5 flex-shrink-0" strokeWidth={2} />
-                {isSidebarExpanded && <span className="text-[13px] truncate">{item.label}</span>}
-              </button>
-            );
-          })}
+        <nav className="flex flex-col gap-4 py-4 overflow-y-auto flex-1 custom-scrollbar">
+          {(() => {
+            const navGroups = [
+              {
+                title: 'Администратор',
+                items: [
+                  { id: 'dashboard', label: 'Аналитика системы', icon: LayoutDashboard },
+                  { id: 'archive_processing', label: 'Загрузка прайсов', icon: Archive },
+                  { id: 'price_documents', label: 'Реестр документов', icon: FileText },
+                ]
+              },
+              {
+                title: 'Оператор',
+                items: [
+                  { id: 'verification_queue', label: 'Очередь верификации', icon: ListChecks },
+                  { id: 'unmatched_services', label: 'Несопоставленные', icon: ZapOff },
+                ]
+              },
+              {
+                title: 'Справочники и настройки',
+                items: [
+                  { id: 'service_catalog', label: 'Справочник услуг', icon: BookOpen },
+                  { id: 'partners', label: 'Партнеры (Клиники)', icon: Users },
+                  { id: 'price_explorer', label: 'Поиск цен', icon: Search },
+                  { id: 'api_center', label: 'Интеграция API', icon: Cpu },
+                  { id: 'settings', label: 'Настройки системы', icon: Settings },
+                ]
+              }
+            ];
+            return navGroups.map((group, gIdx) => (
+              <div key={gIdx} className="flex flex-col gap-1">
+                {isSidebarExpanded && (
+                  <span className="text-[10px] uppercase font-bold text-white/50 px-3.5 mb-1.5 tracking-wider">
+                    {group.title}
+                  </span>
+                )}
+                {group.items.map((item) => {
+                  const Icon = item.icon;
+                  const isActive = activeTab === item.id;
+                  return (
+                    <button
+                      key={item.id}
+                      onClick={() => setActiveTab(item.id as ActiveTab)}
+                      className={`w-full h-10 rounded-xl flex items-center transition-all duration-150 cursor-pointer ${
+                        isSidebarExpanded ? 'px-3.5 gap-3' : 'justify-center'
+                      } ${
+                        isActive
+                          ? 'bg-white text-[#4f46e5] shadow-md font-semibold'
+                          : 'text-white/85 hover:bg-white/10 hover:text-white'
+                      }`}
+                    >
+                      <Icon className="w-4.5 h-4.5 flex-shrink-0" strokeWidth={2} />
+                      {isSidebarExpanded && <span className="text-[12px] truncate">{item.label}</span>}
+                    </button>
+                  );
+                })}
+              </div>
+            ));
+          })()}
         </nav>
 
         {/* Footer info */}
@@ -1028,7 +1972,7 @@ export default function Dashboard() {
                           {renderStructuredLogs(doc.parse_log)}
                         </td>
                         <td className="px-4 py-3 text-center">
-                          <span className={`px-2 py-0.5 rounded-full text-[10px] font-bold border ${
+                          <span className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-bold border ${
                             doc.parse_status === 'done'
                               ? 'bg-emerald-50 text-emerald-700 border-emerald-200'
                               : doc.parse_status === 'processing'
@@ -1039,7 +1983,12 @@ export default function Dashboard() {
                               ? 'bg-rose-50 text-rose-700 border-rose-200'
                               : 'bg-slate-50 text-slate-500 border-slate-200'
                           }`}>
-                            {doc.parse_status === 'done' && 'Успех'}
+                            {doc.parse_status === 'done' && (
+                              <>
+                                <CheckCircle2 className="w-3 h-3 text-emerald-500" />
+                                <span>Успех</span>
+                              </>
+                            )}
                             {doc.parse_status === 'processing' && 'Обработка'}
                             {doc.parse_status === 'needs_review' && 'Ревью'}
                             {doc.parse_status === 'error' && 'Ошибка'}
@@ -1110,7 +2059,7 @@ export default function Dashboard() {
                           </div>
                         </td>
                         <td className="px-4 py-3 font-bold text-slate-700">{item.price_resident_kzt} KZT</td>
-                        <td className="px-4 py-3 text-slate-500">{item.price_nonresident_kzt} KZT</td>
+                        <td className="px-4 py-3 text-slate-500">{item.price_nonresident_kzt} {item.currency_original || 'KZT'}</td>
                         <td className="px-4 py-3 text-amber-700 bg-amber-50/40 font-medium">
                           <div className="flex items-center gap-1">
                             <AlertTriangle className="w-3.5 h-3.5 text-amber-500 flex-shrink-0" />
@@ -1118,32 +2067,63 @@ export default function Dashboard() {
                           </div>
                         </td>
                         <td className="px-4 py-3 text-center">
-                          <button
-                            onClick={async () => {
-                              try {
-                                const res = await fetch('/api/verify', {
-                                  method: 'POST',
-                                  headers: { 'Content-Type': 'application/json' },
-                                  body: JSON.stringify({
-                                    item_id: item.item_id,
-                                    is_verified: true,
-                                    verification_note: 'Подтверждено вручную оператором'
-                                  })
-                                });
-                                if (res.ok) {
-                                  showToast('Запись успешно верифицирована!', 'success');
-                                  refreshAllData();
-                                } else {
-                                  showToast('Ошибка при верификации позиции', 'error');
+                          <div className="flex items-center justify-center gap-1.5">
+                            <button
+                              onClick={async () => {
+                                const originalState = {
+                                  item_id: item.item_id,
+                                  service_id: item.service_id,
+                                  service_name_raw: item.service_name_raw,
+                                  price_resident_kzt: item.price_resident_kzt,
+                                  price_nonresident_kzt: item.price_nonresident_kzt,
+                                  currency_original: item.currency_original,
+                                  is_verified: item.is_verified,
+                                  verification_note: item.verification_note
+                                };
+
+                                try {
+                                  const res = await fetch('/api/verify', {
+                                    method: 'POST',
+                                    headers: { 'Content-Type': 'application/json' },
+                                    body: JSON.stringify({
+                                      item_id: item.item_id,
+                                      is_verified: true,
+                                      verification_note: 'Подтверждено вручную оператором'
+                                    })
+                                  });
+                                  if (res.ok) {
+                                    showToast('Запись успешно верифицирована!', 'success');
+
+                                    const action = {
+                                      id: 'action-' + Date.now() + '-' + Math.random().toString(36).substr(2, 5),
+                                      type: 'verify' as const,
+                                      itemId: item.item_id,
+                                      itemNameRaw: item.service_name_raw,
+                                      oldState: originalState,
+                                      timestamp: new Date().toISOString()
+                                    };
+                                    addUndoAction(action);
+
+                                    refreshAllData();
+                                  } else {
+                                    showToast('Ошибка при верификации позиции', 'error');
+                                  }
+                                } catch (e) {
+                                  showToast('Сбой соединения', 'error');
                                 }
-                              } catch (e) {
-                                showToast('Сбой соединения', 'error');
-                              }
-                            }}
-                            className="h-8 px-3 bg-emerald-600 text-white font-bold rounded-lg text-[11px] hover:bg-emerald-700 transition cursor-pointer"
-                          >
-                            Подтвердить
-                          </button>
+                              }}
+                              className="h-8 px-3 bg-emerald-600 text-white font-bold rounded-lg text-[11px] hover:bg-emerald-700 transition cursor-pointer"
+                            >
+                              Подтвердить
+                            </button>
+                            <button
+                              onClick={() => startEditingItem(item)}
+                              className="h-8 px-2 bg-slate-100 text-slate-700 hover:bg-slate-200 rounded-lg text-[11px] font-bold transition cursor-pointer"
+                              title="Редактировать позицию"
+                            >
+                              Редактировать
+                            </button>
+                          </div>
                         </td>
                       </tr>
                     ))}
@@ -1157,6 +2137,44 @@ export default function Dashboard() {
                   </tbody>
                 </table>
               </div>
+
+              {/* Undo action history section */}
+              {undoHistory.length > 0 && (
+                <div className="mt-5 border-t border-slate-100 pt-4 flex-shrink-0">
+                  <h4 className="font-bold text-slate-800 text-xs mb-3 flex items-center gap-1.5">
+                    <History className="w-4 h-4 text-slate-500" />
+                    История ваших недавних действий (с возможностью отмены)
+                  </h4>
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-3 max-h-[140px] overflow-y-auto custom-scrollbar pr-1">
+                    {undoHistory.map((action, idx) => (
+                      <div key={idx} className="bg-slate-50/70 border border-slate-200 rounded-xl p-3 flex items-center justify-between text-xs">
+                        <div className="min-w-0 pr-4">
+                          <span className={`inline-block px-1.5 py-0.5 rounded-[4px] text-[9px] font-extrabold uppercase mr-1.5 ${
+                            action.type === 'match' ? 'bg-indigo-50 text-indigo-700 border border-indigo-200' :
+                            action.type === 'verify' ? 'bg-emerald-50 text-emerald-700 border border-emerald-200' :
+                            'bg-amber-50 text-amber-700 border border-amber-200'
+                          }`}>
+                            {action.type === 'match' ? 'Сопоставление' : action.type === 'verify' ? 'Верификация' : 'Редактирование'}
+                          </span>
+                          <span className="font-semibold text-slate-800 truncate block mt-1" title={action.itemNameRaw}>
+                            {action.itemNameRaw}
+                          </span>
+                          <span className="block text-[10px] text-slate-400 mt-0.5">
+                            {new Date(action.timestamp).toLocaleTimeString()}
+                          </span>
+                        </div>
+                        <button
+                          onClick={() => handleUndo(action)}
+                          className="px-2.5 py-1 bg-slate-200 hover:bg-rose-100 hover:text-rose-700 font-bold rounded-lg text-[10px] text-slate-700 cursor-pointer transition flex-shrink-0"
+                        >
+                          Отменить
+                        </button>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+
             </div>
           )}
 
@@ -1204,19 +2222,28 @@ export default function Dashboard() {
                             </td>
                             <td className="px-4 py-3 font-bold text-slate-700">{item.price_resident_kzt} KZT</td>
                             <td className="px-4 py-3 text-center">
-                              <button
-                                onClick={() => {
-                                  setSelectedUnmatchedItem(item);
-                                  setMappingSearch(item.service_name_raw);
-                                }}
-                                className={`h-8 px-3 rounded-lg text-[11px] font-bold transition cursor-pointer ${
-                                  isSelected
-                                    ? 'bg-indigo-600 text-white'
-                                    : 'bg-indigo-50 text-indigo-700 hover:bg-indigo-100'
-                                }`}
-                              >
-                                {isSelected ? 'Выбрано' : 'Разметить'}
-                              </button>
+                              <div className="flex items-center justify-center gap-1.5">
+                                <button
+                                  onClick={() => {
+                                    setSelectedUnmatchedItem(item);
+                                    setMappingSearch(item.service_name_raw);
+                                  }}
+                                  className={`h-8 px-3 rounded-lg text-[11px] font-bold transition cursor-pointer ${
+                                    isSelected
+                                      ? 'bg-indigo-600 text-white'
+                                      : 'bg-indigo-50 text-indigo-700 hover:bg-indigo-100'
+                                  }`}
+                                >
+                                  {isSelected ? 'Выбрано' : 'Разметить'}
+                                </button>
+                                <button
+                                  onClick={() => startEditingItem(item)}
+                                  className="h-8 px-2 bg-slate-100 text-slate-700 hover:bg-slate-200 rounded-lg text-[11px] font-bold transition cursor-pointer"
+                                  title="Редактировать позицию"
+                                >
+                                  Редактировать
+                                </button>
+                              </div>
                             </td>
                           </tr>
                         );
@@ -1374,6 +2401,14 @@ export default function Dashboard() {
                     <span>Загрузить справочник</span>
                     <input type="file" onChange={handleCatalogUpload} className="hidden" accept=".xlsx,.xls,.json" disabled={catalogFileUploading} />
                   </label>
+
+                  <button
+                    onClick={startCreatingService}
+                    className="h-10 px-4 bg-emerald-600 hover:bg-emerald-700 text-white font-bold rounded-xl text-xs flex items-center gap-1.5 cursor-pointer shadow-sm transition"
+                  >
+                    <Plus className="w-4 h-4" />
+                    <span>Добавить услугу</span>
+                  </button>
                 </div>
               </div>
 
@@ -1388,6 +2423,7 @@ export default function Dashboard() {
                       <th className="px-4">Синонимы</th>
                       <th className="px-4">Код МКБ</th>
                       <th className="px-4 text-center">Статус</th>
+                      <th className="px-4 text-center w-36">Действие</th>
                     </tr>
                   </thead>
                   <tbody>
@@ -1418,16 +2454,38 @@ export default function Dashboard() {
                           </td>
                           <td className="px-4 py-3 text-slate-400 font-mono">{s.icd_code || '—'}</td>
                           <td className="px-4 py-3 text-center">
-                            <span className="bg-emerald-50 text-emerald-700 border border-emerald-200 px-2 py-0.5 rounded-full text-[10px] font-bold">
-                              Активен
+                            <span className={`px-2 py-0.5 rounded-full text-[10px] font-bold border ${
+                              s.is_active 
+                                ? 'bg-emerald-50 text-emerald-700 border-emerald-200' 
+                                : 'bg-slate-100 text-slate-400 border-slate-200'
+                            }`}>
+                              {s.is_active ? 'Активен' : 'Неактивен'}
                             </span>
+                          </td>
+                          <td className="px-4 py-3 text-center">
+                            <div className="flex items-center justify-center gap-1.5">
+                              <button
+                                onClick={() => startEditingService(s)}
+                                className="h-7 px-2 bg-slate-100 text-slate-700 hover:bg-slate-200 rounded-lg text-[10px] font-bold transition cursor-pointer"
+                                title="Редактировать"
+                              >
+                                Изменить
+                              </button>
+                              <button
+                                onClick={() => handleDeleteService(s.service_id)}
+                                className="h-7 px-2 bg-rose-50 text-rose-600 hover:bg-rose-100 rounded-lg text-[10px] font-bold transition cursor-pointer"
+                                title="Удалить / Деактивировать"
+                              >
+                                Удалить
+                              </button>
+                            </div>
                           </td>
                         </tr>
                       );
                     })}
                     {filteredCatalog.length === 0 && (
                       <tr>
-                        <td colSpan={6} className="py-12 text-center text-slate-400">
+                        <td colSpan={7} className="py-12 text-center text-slate-400">
                           Справочник пуст. Загрузите файл XLSX или JSON для наполнения.
                         </td>
                       </tr>
@@ -1464,6 +2522,14 @@ export default function Dashboard() {
                       ))}
                     </select>
                   </div>
+
+                  <button
+                    onClick={startCreatingPartner}
+                    className="h-10 px-4 bg-indigo-600 hover:bg-indigo-700 text-white font-bold rounded-xl text-xs flex items-center gap-1.5 cursor-pointer shadow-sm transition"
+                  >
+                    <Plus className="w-4 h-4" />
+                    <span>Добавить партнера</span>
+                  </button>
                 </div>
               </div>
 
@@ -1475,8 +2541,12 @@ export default function Dashboard() {
                       <div>
                         <div className="flex items-center justify-between">
                           <h4 className="font-bold text-slate-800 text-sm truncate max-w-[180px]">{p.name}</h4>
-                          <span className="bg-emerald-50 text-emerald-700 border border-emerald-200 px-1.5 py-0.5 rounded text-[10px] font-bold">
-                            Активен
+                          <span className={`px-1.5 py-0.5 rounded text-[10px] font-bold border ${
+                            p.is_active 
+                              ? 'bg-emerald-50 text-emerald-700 border-emerald-200' 
+                              : 'bg-slate-100 text-slate-400 border-slate-200'
+                          }`}>
+                            {p.is_active ? 'Активен' : 'Неактивен'}
                           </span>
                         </div>
                         <p className="text-[10px] text-slate-400 mt-0.5">БИН: {p.bin || '—'}</p>
@@ -1497,17 +2567,33 @@ export default function Dashboard() {
                         </div>
                       </div>
 
-                      <div className="border-t border-slate-150 pt-3 mt-4 flex items-center justify-between text-[10px] text-slate-400">
-                        <span>Добавлен: {new Date(p.created_at).toLocaleDateString()}</span>
-                        <button
-                          onClick={() => {
-                            setSelectedPartnerId(p.partner_id);
-                            setActiveTab('price_explorer');
-                          }}
-                          className="text-indigo-600 hover:text-indigo-800 font-bold cursor-pointer"
-                        >
-                          Смотреть услуги
-                        </button>
+                      <div className="border-t border-slate-150 pt-3 mt-4 flex flex-col gap-2">
+                        <div className="flex items-center justify-between text-[10px] text-slate-400">
+                          <span>Добавлен: {new Date(p.created_at).toLocaleDateString()}</span>
+                          <button
+                            onClick={() => {
+                              setActiveTab('price_explorer');
+                            }}
+                            className="text-indigo-600 hover:text-indigo-800 font-bold cursor-pointer"
+                          >
+                            Смотреть услуги
+                          </button>
+                        </div>
+                        <div className="flex items-center justify-end gap-2.5 text-[10px] pt-2 border-t border-dashed border-slate-100">
+                          <button
+                            onClick={() => startEditingPartner(p)}
+                            className="text-indigo-600 hover:text-indigo-800 font-bold cursor-pointer"
+                          >
+                            Изменить
+                          </button>
+                          <span className="text-slate-300">•</span>
+                          <button
+                            onClick={() => handleDeletePartner(p.partner_id)}
+                            className="text-rose-600 hover:text-rose-800 font-bold cursor-pointer"
+                          >
+                            Удалить
+                          </button>
+                        </div>
                       </div>
                     </div>
                   ))}
@@ -1598,8 +2684,15 @@ export default function Dashboard() {
                       {explorerServiceClinics.map((clinic, idx) => (
                         <div key={idx} className="p-4 hover:bg-slate-50/50 flex flex-col gap-2">
                           <div className="flex items-center justify-between">
-                            <span className="font-bold text-slate-800 text-xs">{clinic.partner_name}</span>
-                            <span className="text-[10px] text-slate-400 font-mono">{clinic.city}</span>
+                            <div className="flex items-center gap-1.5 min-w-0">
+                              <span className="font-bold text-slate-800 text-xs truncate">{clinic.partner_name}</span>
+                              {clinic.is_verified && (
+                                <span title="Верифицировано" className="flex-shrink-0">
+                                  <CheckCircle2 className="w-3.5 h-3.5 text-emerald-500" />
+                                </span>
+                              )}
+                            </div>
+                            <span className="text-[10px] text-slate-400 font-mono flex-shrink-0">{clinic.city}</span>
                           </div>
 
                           <div className="grid grid-cols-2 gap-4 text-xs mt-1">
@@ -1609,7 +2702,7 @@ export default function Dashboard() {
                             </div>
                             <div className="bg-blue-50/50 border border-blue-100 p-2 rounded-lg">
                               <span className="text-[9px] text-blue-600 uppercase font-semibold">Нерезидент:</span>
-                              <p className="font-bold text-blue-800 mt-0.5">{clinic.price_nonresident_kzt} KZT</p>
+                              <p className="font-bold text-blue-800 mt-0.5">{clinic.price_nonresident_kzt} {clinic.currency_original || 'KZT'}</p>
                             </div>
                           </div>
 
@@ -1779,17 +2872,37 @@ export default function Dashboard() {
                 <div className="flex items-center justify-between border-b border-slate-100 pb-3">
                   <div>
                     <h4 className="font-semibold text-slate-800">Курс конвертации USD/KZT</h4>
-                    <p className="text-[11px] text-slate-400 mt-0.5">Фиксированный курс для пересчета валютных позиций</p>
+                    <p className="text-[11px] text-slate-400 mt-0.5">Настраиваемый курс для пересчета валютных позиций</p>
                   </div>
-                  <span className="font-bold text-slate-800">450.00 KZT</span>
+                  <div className="flex items-center gap-1.5">
+                    <input
+                      type="number"
+                      step="1"
+                      min="1"
+                      value={usdRate}
+                      onChange={(e) => handleSaveSettings({ usdRate: parseFloat(e.target.value) })}
+                      className="h-9 w-24 px-3 bg-white border border-slate-200 rounded-lg text-xs font-bold text-slate-800"
+                    />
+                    <span className="text-xs font-semibold text-slate-500">KZT</span>
+                  </div>
                 </div>
 
                 <div className="flex items-center justify-between border-b border-slate-100 pb-3">
                   <div>
                     <h4 className="font-semibold text-slate-800">Курс конвертации RUB/KZT</h4>
-                    <p className="text-[11px] text-slate-400 mt-0.5">Фиксированный курс для пересчета валютных позиций</p>
+                    <p className="text-[11px] text-slate-400 mt-0.5">Настраиваемый курс для пересчета валютных позиций</p>
                   </div>
-                  <span className="font-bold text-slate-800">5.00 KZT</span>
+                  <div className="flex items-center gap-1.5">
+                    <input
+                      type="number"
+                      step="0.1"
+                      min="0.1"
+                      value={rubRate}
+                      onChange={(e) => handleSaveSettings({ rubRate: parseFloat(e.target.value) })}
+                      className="h-9 w-24 px-3 bg-white border border-slate-200 rounded-lg text-xs font-bold text-slate-800"
+                    />
+                    <span className="text-xs font-semibold text-slate-500">KZT</span>
+                  </div>
                 </div>
 
               </div>
@@ -1802,3 +2915,7 @@ export default function Dashboard() {
     </div>
   );
 }
+
+
+
+

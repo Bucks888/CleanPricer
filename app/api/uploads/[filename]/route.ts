@@ -1,16 +1,20 @@
 import { NextResponse } from 'next/server';
 import fs from 'fs';
 import path from 'path';
+import { createAuthErrorResponse, requireAuthenticatedSession } from '../../../auth_utils';
 
 export async function GET(
   req: Request,
   context: { params: Promise<{ filename: string }> }
 ) {
   try {
+    if (!requireAuthenticatedSession(req.headers.get('cookie'))) {
+      return createAuthErrorResponse();
+    }
+
     const { filename } = await context.params;
     const decodedFilename = decodeURIComponent(filename);
 
-    // Prevent directory traversal attacks
     const sanitizedFilename = path.basename(decodedFilename);
     const filePath = path.join(process.cwd(), 'uploads', sanitizedFilename);
 
@@ -38,8 +42,10 @@ export async function GET(
         'Content-Disposition': `attachment; filename="${encodeURIComponent(sanitizedFilename)}"`,
       },
     });
-  } catch (error: any) {
+  } catch (error: unknown) {
     console.error('Error in download file API:', error);
-    return NextResponse.json({ error: 'Ошибка сервера: ' + error.message }, { status: 500 });
+    const message = error instanceof Error ? error.message : String(error);
+    return NextResponse.json({ error: 'Ошибка сервера: ' + message }, { status: 500 });
   }
 }
+

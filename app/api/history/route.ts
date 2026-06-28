@@ -1,8 +1,13 @@
 import { NextResponse } from 'next/server';
 import { pool } from '../../db_utils';
+import { createAuthErrorResponse, requireAuthenticatedSession } from '../../auth_utils';
 
 export async function GET(req: Request) {
   try {
+    if (!requireAuthenticatedSession(req.headers.get('cookie'))) {
+      return createAuthErrorResponse();
+    }
+
     const { searchParams } = new URL(req.url);
     const service_id = searchParams.get('service_id');
     const partner_id = searchParams.get('partner_id');
@@ -33,8 +38,9 @@ export async function GET(req: Request) {
 
     const res = await pool.query(query, [service_id, partner_id]);
     return NextResponse.json(res.rows);
-  } catch (error: any) {
+  } catch (error: unknown) {
     console.error('Error fetching price history:', error);
-    return NextResponse.json({ error: error.message }, { status: 500 });
+    const message = error instanceof Error ? error.message : String(error);
+    return NextResponse.json({ error: message }, { status: 500 });
   }
 }

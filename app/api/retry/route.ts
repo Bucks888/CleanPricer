@@ -1,16 +1,23 @@
 import { NextResponse } from 'next/server';
+import path from 'path';
 import { pool, update_price_document } from '../../db_utils';
 import { enqueueDocument } from '../../queue_utils';
-import path from 'path';
+import { createAuthErrorResponse, requireAuthenticatedSession } from '../../auth_utils';
+import { isUuidLike } from '../../safe_utils';
 
 export async function POST(req: Request) {
   try {
-    const { doc_id } = await req.json();
-    if (!doc_id) {
-      return NextResponse.json({ error: 'Параметр doc_id обязателен' }, { status: 400 });
+    if (!requireAuthenticatedSession(req.headers.get('cookie'))) {
+      return createAuthErrorResponse();
     }
 
-    // Lookup document details
+    const body = await req.json();
+    const doc_id = body?.doc_id;
+
+    if (!isUuidLike(doc_id)) {
+      return NextResponse.json({ error: 'Параметр doc_id обязателен и должен быть UUID' }, { status: 400 });
+    }
+
     const res = await pool.query(
       'SELECT doc_id, file_name, file_format, parse_status FROM price_documents WHERE doc_id = $1',
       [doc_id]
@@ -28,13 +35,11 @@ export async function POST(req: Request) {
       );
     }
 
-    // Reset status to pending and clear the logs
     await update_price_document(doc.doc_id, {
       parse_status: 'pending',
       parse_log: '',
     });
 
-    // Enqueue back into sequential processor queue
     const filePath = path.join(process.cwd(), 'uploads', doc.file_name);
 
     enqueueDocument({
@@ -48,8 +53,9 @@ export async function POST(req: Request) {
       success: true,
       message: `Документ ${doc.file_name} успешно поставлен в очередь на повторную обработку.`,
     });
-  } catch (error: any) {
+  } catch (error: unknown) {
     console.error('Error in retry endpoint:', error);
-    return NextResponse.json({ error: 'Ошибка сервера: ' + error.message }, { status: 500 });
+    const message = error instanceof Error ? error.message : String(error);
+    return NextResponse.json({ error: 'Ошибка сервера: ' + message }, { status: 500 });
   }
 }
